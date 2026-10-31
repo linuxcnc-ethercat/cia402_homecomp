@@ -10,7 +10,9 @@ typedef enum {
     CIA_HOME_IDLE = 0,
     CIA_HOME_WAIT_MODE,
     CIA_HOME_RUNNING,
-    CIA_HOME_BASE
+    CIA_HOME_BASE,
+    CIA_HOME_WAIT_ENABLE,
+    CIA_HOME_WAIT_UNLOCK
 } cia_home_state_t;
 
 typedef struct {
@@ -40,8 +42,10 @@ typedef struct {
     hal_bit_t *cia_stat_homing;        // IN
     hal_bit_t *cia_stat_homing_error;  // IN
     hal_bit_t *cia_stat_fault;         // IN
+    hal_bit_t *cia_stat_op_enabled;    // IN
     hal_s32_t *cia_opmode_display;     // IN
     hal_s32_t *cia_state;              // OUT
+    hal_bit_t *cia_peer_abort;         // OUT
 
     // Zero disables the timeout.  The default is applied at pin creation.
     hal_u32_t *cia_timeout_ms;         // IN
@@ -49,4 +53,6 @@ typedef struct {
     cia_home_state_t state;
     int64_t elapsed_ns;
     bool enable_inhibit;
+    bool homed_seen_clear;
+    bool peer_abort;
 } cia402_joint_t;

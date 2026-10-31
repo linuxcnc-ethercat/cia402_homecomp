@@ -135,8 +135,10 @@ static int custom_makepins(int id, int njoints)
         PIN(cia_stat_homing, HAL_BIT, HAL_IN, 0, "stat-homing");
         PIN(cia_stat_homing_error, HAL_BIT, HAL_IN, 0, "stat-homing-error");
         PIN(cia_stat_fault, HAL_BIT, HAL_IN, 0, "stat-fault");
+        PIN(cia_stat_op_enabled, HAL_BIT, HAL_IN, 0, "stat-op-enabled");
         PIN(cia_opmode_display, HAL_S32, HAL_IN, 0, "opmode-display");
         PIN(cia_state, HAL_S32, HAL_OUT, 0, "state");
+        PIN(cia_peer_abort, HAL_BIT, HAL_OUT, 0, "peer-abort");
         PIN(cia_timeout_ms, HAL_U32, HAL_IN, CIA_DEFAULT_TIMEOUT_MS,
             "timeout-ms");
 #undef PIN
@@ -146,25 +148,30 @@ static int custom_makepins(int id, int njoints)
 
 static bool custom_selected(int jno)
 {
-    return LCEC_PIN_BIT_GET(ciaJ[jno].request_custom_homing) ||
-           ciaJ[jno].state != CIA_HOME_IDLE;
+    if (ciaJ[jno].state != CIA_HOME_IDLE) return 1;
+    return LCEC_PIN_BIT_GET(ciaJ[jno].request_custom_homing) &&
+           !(H[jno].home_flags & HOME_ABSOLUTE_ENCODER);
 }
 
 static bool custom_holding_feedback(int jno)
 {
     cia_home_state_t state = ciaJ[jno].state;
-    return state == CIA_HOME_WAIT_MODE || state == CIA_HOME_RUNNING;
+    return state == CIA_HOME_WAIT_ENABLE ||
+           state == CIA_HOME_WAIT_MODE || state == CIA_HOME_RUNNING;
 }
 
 static void custom_update_outputs(int jno)
 {
     cia402_joint_t *c = &ciaJ[jno];
     bool homing = custom_holding_feedback(jno);
+    bool home_request = c->state == CIA_HOME_WAIT_MODE ||
+                        c->state == CIA_HOME_RUNNING;
 
     LCEC_PIN_BIT_SET(c->is_custom_homing,
         LCEC_PIN_BIT_GET(c->request_custom_homing));
-    LCEC_PIN_BIT_SET(c->cia_home, homing);
+    LCEC_PIN_BIT_SET(c->cia_home, home_request);
     LCEC_PIN_S32_SET(c->cia_state, c->state);
+    LCEC_PIN_BIT_SET(c->cia_peer_abort, c->peer_abort);
     LCEC_PIN_BIT_SET(c->cia_enable_out,
         LCEC_PIN_BIT_GET(c->cia_enable_in) && !c->enable_inhibit);
 
@@ -191,7 +198,7 @@ static void custom_sync_position(int jno, bool at_home)
     double actual = LCEC_PIN_FLOAT_GET(c->cia_pos_fb_in);
 
     if (at_home) {
-        joint->motor_offset = actual - H[jno].home_offset;
+        joint->motor_offset = actual - joint->backlash_filt - H[jno].home_offset;
     }
     joint->motor_pos_fb = actual;
     joint->pos_fb = actual - (joint->backlash_filt + joint->motor_offset);
@@ -202,10 +209,94 @@ static void custom_sync_position(int jno, bool at_home)
     joint->free_tp.enable = 0;
 }
 
+static void custom_cleanup_idle(int jno)
+{
+    cia402_joint_t *c = &ciaJ[jno];
+    if (!H[jno].homed && !c->enable_inhibit) {
+        c->enable_inhibit = 1;
+        c->peer_abort = 1;
+        custom_sync_position(jno, false);
+    }
+    c->state = CIA_HOME_IDLE;
+}
+
+static void custom_abort_peer(int jno)
+{
+    cia402_joint_t *c = &ciaJ[jno];
+    if (c->state == CIA_HOME_IDLE ||
+        (c->peer_abort && H[jno].home_state == HOME_ABORT)) {
+        return;
+    }
+    rtapi_print_msg(RTAPI_MSG_ERR,
+        "cia402_homecomp: joint %d homing aborted: peer failure\n", jno);
+    c->enable_inhibit = 1;
+    c->peer_abort = 1;
+    c->state = CIA_HOME_BASE;
+    custom_sync_position(jno, false);
+    H[jno].home_state = HOME_ABORT;
+}
+
+static void custom_abort_sequence_peers(int jno)
+{
+    int peer;
+    for (peer = 0; peer < all_joints; peer++) {
+        cia402_joint_t *p = &ciaJ[peer];
+        if (peer == jno || p->state == CIA_HOME_IDLE ||
+            ABS(H[peer].home_sequence) != ABS(H[jno].home_sequence)) {
+            continue;
+        }
+        if (H[peer].home_state == HOME_IDLE &&
+            !H[peer].joint_in_sequence) {
+            /* Base 2.10 HOME_ABORT already cleared every joint.  Do not
+               re-arm an out-of-sequence peer and strand its cleanup. */
+            custom_cleanup_idle(peer);
+        } else {
+            custom_abort_peer(peer);
+        }
+    }
+}
+
+#ifdef CIA402_HOMING_HAS_DISTANCES
+static void custom_return_peer(int jno)
+{
+    cia402_joint_t *c = &ciaJ[jno];
+    if (c->state == CIA_HOME_BASE && c->peer_abort) return;
+    rtapi_print_msg(RTAPI_MSG_ERR,
+        "cia402_homecomp: joint %d homing stopped: peer return\n", jno);
+    c->enable_inhibit = 1;
+    c->peer_abort = 1;
+    c->state = CIA_HOME_BASE;
+    custom_sync_position(jno, false);
+}
+
+static void custom_return_sequence_peers(int jno)
+{
+    int peer;
+    for (peer = 0; peer < all_joints; peer++) {
+        cia402_joint_t *p = &ciaJ[peer];
+        if (peer == jno || p->state == CIA_HOME_IDLE ||
+            ABS(H[peer].home_sequence) != ABS(H[jno].home_sequence)) {
+            continue;
+        }
+        custom_return_peer(peer);
+    }
+}
+#endif
+
 static void custom_abort(int jno, const char *reason)
 {
     cia402_joint_t *c = &ciaJ[jno];
-    if (c->state == CIA_HOME_IDLE) return;
+
+    if (c->state == CIA_HOME_IDLE ||
+        (c->state == CIA_HOME_BASE &&
+         (H[jno].home_state == HOME_ABORT ||
+          H[jno].home_state == HOME_IDLE))) {
+        return;
+    }
+
+    /* Do not depend on another servo period or task cancellation to stop
+       peers.  A failed drive may leave its sequence peers moving internally. */
+    custom_abort_sequence_peers(jno);
 
     rtapi_print_msg(RTAPI_MSG_ERR,
         "cia402_homecomp: joint %d homing aborted: %s\n", jno, reason);
@@ -221,7 +312,7 @@ static void custom_finish_drive_homing(int jno)
     custom_sync_position(jno, true);
     c->state = CIA_HOME_BASE;
     if (H[jno].home_flags & HOME_NO_FINAL_MOVE) {
-        H[jno].home_state = HOME_FINISHED;
+        H[jno].home_state = HOME_LOCK;
     } else {
         H[jno].home_state = HOME_FINAL_MOVE_START;
     }
@@ -231,46 +322,105 @@ static int custom_1joint_state_machine(int jno)
 {
     cia402_joint_t *c = &ciaJ[jno];
 
+#ifdef CIA402_HOMING_HAS_DISTANCES
+    if (c->state != CIA_HOME_BASE &&
+        (H[jno].home_state == HOME_RETURN_START ||
+         H[jno].home_state == HOME_RETURN_WAIT)) {
+        /* Stop drive-owned motion but leave the base return state intact. */
+        custom_return_peer(jno);
+    }
+#endif
+
     if (c->state == CIA_HOME_BASE) {
         int busy = base_1joint_state_machine(jno);
-        if (H[jno].home_state == HOME_IDLE) c->state = CIA_HOME_IDLE;
+        if (H[jno].home_state == HOME_IDLE) {
+            if (H[jno].homed && (H[jno].home_flags & HOME_NO_FINAL_MOVE)) {
+                /* Base HOME_FINISHED targets HOME even when its move was
+                   suppressed.  Restore the reference position instead. */
+                custom_sync_position(jno, false);
+            }
+            c->state = CIA_HOME_IDLE;
+        }
         return busy;
     }
 
     if (H[jno].home_state == HOME_IDLE) {
-        c->state = CIA_HOME_IDLE;
+        custom_cleanup_idle(jno);
         return 0;
     }
 
     if (H[jno].home_state == HOME_START && c->state == CIA_HOME_IDLE) {
+        if ((H[jno].home_flags & HOME_NO_REHOME) && H[jno].homed) {
+            H[jno].home_state = HOME_IDLE;
+            return 0;
+        }
         H[jno].homing = 1;
         H[jno].homed = 0;
+#ifdef CIA402_HOMING_HAS_DISTANCES
+        H[jno].moved = 0;
+#endif
+        H[jno].pause_timer = 0;
         joints[jno].free_tp.enable = 0;
+        sync_reset();
         c->enable_inhibit = 0;
         c->elapsed_ns = 0;
-        c->state = CIA_HOME_WAIT_MODE;
-        return 1;  // Let cia402 see the home request first.
+        c->homed_seen_clear = 0;
+        c->peer_abort = 0;
+        if (H[jno].home_flags & HOME_UNLOCK_FIRST) {
+            SetRotaryUnlock(jno, 1);
+            H[jno].home_state = HOME_UNLOCK_WAIT;
+            c->state = CIA_HOME_WAIT_UNLOCK;
+        } else {
+            c->state = CIA_HOME_WAIT_ENABLE;
+        }
+        return 1;
     }
 
-    if (c->state != CIA_HOME_WAIT_MODE && c->state != CIA_HOME_RUNNING) {
+    if (c->state != CIA_HOME_WAIT_UNLOCK &&
+        c->state != CIA_HOME_WAIT_ENABLE &&
+        c->state != CIA_HOME_WAIT_MODE && c->state != CIA_HOME_RUNNING) {
         c->elapsed_ns = 0;
-        c->state = CIA_HOME_WAIT_MODE;
+        c->state = CIA_HOME_WAIT_ENABLE;
     }
 
     c->elapsed_ns += (int64_t)(cia_servo_period * 1000000000.0 + 0.5);
-
     if (LCEC_PIN_BIT_GET(c->cia_stat_fault)) {
         custom_abort(jno, "drive fault");
-    } else if (LCEC_PIN_BIT_GET(c->cia_stat_homing_error)) {
+        return 1;
+    }
+
+    if (c->state == CIA_HOME_WAIT_UNLOCK) {
+        if (LCEC_PIN_U32_GET(c->cia_timeout_ms) &&
+            c->elapsed_ns >=
+                (int64_t)LCEC_PIN_U32_GET(c->cia_timeout_ms) * 1000000LL) {
+            custom_abort(jno, "unlock timeout");
+            return 1;
+        }
+        if (!GetRotaryIsUnlocked(jno)) return 1;
+        H[jno].home_state = HOME_START;
+        c->state = CIA_HOME_WAIT_ENABLE;
+    }
+
+    if ((c->state == CIA_HOME_WAIT_MODE || c->state == CIA_HOME_RUNNING) &&
+        !LCEC_PIN_BIT_GET(c->cia_stat_homed)) {
+        c->homed_seen_clear = 1;
+    }
+
+    if (LCEC_PIN_BIT_GET(c->cia_stat_homing_error)) {
         custom_abort(jno, "drive reported homing error");
-    } else if (LCEC_PIN_BIT_GET(c->cia_stat_homed)) {
+    } else if (c->state != CIA_HOME_WAIT_ENABLE &&
+               LCEC_PIN_BIT_GET(c->cia_stat_homed) && c->homed_seen_clear) {
         custom_finish_drive_homing(jno);
+    } else if (LCEC_PIN_U32_GET(c->cia_timeout_ms) &&
+               c->elapsed_ns >=
+                   (int64_t)LCEC_PIN_U32_GET(c->cia_timeout_ms) * 1000000LL) {
+        custom_abort(jno, "timeout");
+    } else if (c->state == CIA_HOME_WAIT_ENABLE) {
+        if (LCEC_PIN_BIT_GET(c->cia_stat_op_enabled)) {
+            c->state = CIA_HOME_WAIT_MODE;
+        }
     } else {
-        uint32_t timeout_ms = LCEC_PIN_U32_GET(c->cia_timeout_ms);
-        if (timeout_ms &&
-            c->elapsed_ns >= (int64_t)timeout_ms * 1000000LL) {
-            custom_abort(jno, "timeout");
-        } else if (LCEC_PIN_S32_GET(c->cia_opmode_display) == CIA_OPMODE_HOMING) {
+        if (LCEC_PIN_S32_GET(c->cia_opmode_display) == CIA_OPMODE_HOMING) {
             c->state = CIA_HOME_RUNNING;
         }
     }
@@ -317,20 +467,44 @@ bool do_homing(void)
     bool beginning_allhomed = base_get_allhomed();
 
     do_homing_sequence();
+    if (ciaJ) {
+        /* Catch a standard peer before base HOME_ABORT clears its state. */
+        for (jno = 0; jno < all_joints; jno++) {
+            if (H[jno].joint_in_sequence &&
+                H[jno].home_state == HOME_ABORT) {
+                custom_abort_sequence_peers(jno);
+            }
+        }
+    }
     for (jno = 0; jno < all_joints; jno++) {
         if (ciaJ && ciaJ[jno].state != CIA_HOME_IDLE &&
             H[jno].home_state == HOME_IDLE) {
-            if (!H[jno].homed && !ciaJ[jno].enable_inhibit) {
-                custom_sync_position(jno, false);
-            }
-            ciaJ[jno].state = CIA_HOME_IDLE;
+            custom_cleanup_idle(jno);
         }
         if (!H[jno].joint_in_sequence) continue;
         if (!GET_JOINT_ACTIVE_FLAG(&joints[jno])) continue;
         if (ciaJ && custom_selected(jno)) {
             busy += custom_1joint_state_machine(jno);
         } else {
+            if (ciaJ && H[jno].home_state == HOME_START) {
+                /* An explicit standard-homing retry also clears inhibition. */
+                ciaJ[jno].enable_inhibit = 0;
+                ciaJ[jno].peer_abort = 0;
+            }
             busy += base_1joint_state_machine(jno);
+#ifdef CIA402_HOMING_HAS_DISTANCES
+            if (H[jno].home_state == HOME_RETURN_START ||
+                H[jno].home_state == HOME_RETURN_WAIT) {
+                /* Stop custom peers in this servo invocation, including
+                   lower-numbered joints that already ran. */
+                custom_return_sequence_peers(jno);
+            }
+#endif
+            if (H[jno].home_state == HOME_IDLE && !H[jno].homed) {
+                /* Base rejection/abort can clear its own state immediately,
+                   before H[].homing is set on 2.9. */
+                custom_abort_sequence_peers(jno);
+            }
         }
     }
     if (busy > 0) {

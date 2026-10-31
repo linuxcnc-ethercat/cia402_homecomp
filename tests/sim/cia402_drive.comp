@@ -18,9 +18,12 @@ pin out u32 statusword "Simulated CiA402 statusword";
 pin out s32 opmode-display "Displayed operation mode";
 pin out s32 actual-position "Simulated actual position";
 pin out s32 actual-velocity "Simulated actual velocity";
+pin out s32 homing-starts "Accepted drive-homing start edges";
 
 param rw s32 scenario = 0 "0 success, 1 homing error, 2 drive fault, 3 stall";
 param rw s32 homing-ticks = 50 "Cycles needed to finish homing";
+param rw s32 fault-ticks = 25 "Cycles before a scenario-2 drive fault";
+param rw u32 force-fault = 0 "Force a drive fault before homing starts";
 param rw s32 start-position = 100000 "Initial actual position";
 param rw s32 home-position = 0 "Homing target position";
 param rw s32 step-size = 1000 "Position change per homing cycle";
@@ -28,6 +31,8 @@ param rw s32 step-size = 1000 "Position change per homing cycle";
 variable int homing_active = 0;
 variable int previous_homing_request = 0;
 variable int faulted = 0;
+variable int power_state = 0;
+variable int homing_starts_count = 0;
 variable rtapi_s32 elapsed_ticks = 0;
 variable int initialized = 0;
 
@@ -37,9 +42,10 @@ function _;
 license "GPL";
 ;;
 
-/* Operation enabled plus remote: bits 0, 1, 2, 4, 5, and 9. */
+#define STATUS_SWITCH_ON_DISABLED 0x0240u
+#define STATUS_READY_TO_SWITCH_ON 0x0231u
+#define STATUS_SWITCHED_ON 0x0233u
 #define STATUS_OPERATION_ENABLED 0x0237u
-/* Fault plus remote, with operation-enabled bits cleared. */
 #define STATUS_DRIVE_FAULT 0x0208u
 
 #if defined(HAL_API_VERSION) || defined(COMPONENT_TYPE_USER) || defined(HAL_BOOL)
@@ -50,6 +56,8 @@ license "GPL";
 
 FUNCTION(_) {
     int homing_request;
+    int was_op_enabled;
+    unsigned int next_status;
     long long distance;
     long long step;
 
@@ -57,30 +65,56 @@ FUNCTION(_) {
         DRIVE_SET(actual_position, start_position);
         DRIVE_SET(actual_velocity, 0);
         DRIVE_SET(opmode_display, 0);
-        DRIVE_SET(statusword, STATUS_OPERATION_ENABLED);
+        DRIVE_SET(statusword, STATUS_SWITCH_ON_DISABLED);
+        DRIVE_SET(homing_starts, 0);
         initialized = 1;
     }
 
     homing_request = (opmode == 6) && ((controlword & 0x10u) != 0);
-
+    was_op_enabled = power_state == 3;
+    if (force_fault) faulted = 1;
     if (controlword & (1u << 7)) faulted = 0;
 
-    /* A new rising edge restarts the scenario and clears a latched fault. */
-    if (homing_request && !previous_homing_request) {
+    if (faulted) {
+        power_state = 0;
+        next_status = STATUS_DRIVE_FAULT;
+    } else {
+        /* Model the enable sequencing used by cia402.write-all(). */
+        if ((controlword & 0x06u) != 0x06u) {
+            power_state = 0;
+        } else if (!(controlword & 0x01u)) {
+            power_state = 1;
+        } else if (!(controlword & 0x08u)) {
+            power_state = 2;
+        } else {
+            power_state = 3;
+        }
+
+        switch (power_state) {
+        case 1: next_status = STATUS_READY_TO_SWITCH_ON; break;
+        case 2: next_status = STATUS_SWITCHED_ON; break;
+        case 3: next_status = STATUS_OPERATION_ENABLED; break;
+        default: next_status = STATUS_SWITCH_ON_DISABLED; break;
+        }
+    }
+
+    /* Strict drives ignore a bit-4 edge that arrives before the drive was
+       operation-enabled.  Remembering the raw request also prevents a late
+       enable transition from manufacturing a second rising edge. */
+    if (homing_request && !previous_homing_request &&
+        was_op_enabled && !faulted) {
         homing_active = 1;
         elapsed_ticks = 0;
-        faulted = 0;
+        homing_starts_count++;
+        DRIVE_SET(homing_starts, homing_starts_count);
     }
     previous_homing_request = homing_request;
 
-    /* Withdrawing homing mode or bit 4 cancels an incomplete homing cycle. */
-    if (!homing_request) {
+    if (!homing_request || power_state != 3 || faulted) {
         homing_active = 0;
         elapsed_ticks = 0;
     }
 
-    DRIVE_SET(statusword,
-        faulted ? STATUS_DRIVE_FAULT : STATUS_OPERATION_ENABLED);
     DRIVE_SET(actual_velocity, 0);
 
     if (homing_active) {
@@ -100,31 +134,30 @@ FUNCTION(_) {
 
         elapsed_ticks++;
 
-        if (scenario == 2 && elapsed_ticks >= 25) {
-            /* Fail after 25 cycles so 10 ms task polling observes homing. */
+        if (scenario == 2 && elapsed_ticks >= fault_ticks) {
+            /* Delay is configurable so task polling can observe each phase. */
             faulted = 1;
             homing_active = 0;
-            DRIVE_SET(statusword, STATUS_DRIVE_FAULT);
+            next_status = STATUS_DRIVE_FAULT;
         } else if (scenario != 3 && elapsed_ticks >= homing_ticks) {
             homing_active = 0;
             if (scenario == 1) {
                 /* Homing error wins even with target reached asserted. */
-                DRIVE_SET(statusword,
-                    statusword | (1u << 10) | (1u << 13));
+                next_status |= (1u << 10) | (1u << 13);
             } else {
                 DRIVE_SET(actual_position, home_position);
-                DRIVE_SET(statusword,
-                    statusword | (1u << 10) | (1u << 12));
+                next_status |= (1u << 10) | (1u << 12);
             }
         }
         /* Scenario 3 never completes and never sets bits 10, 12, or 13. */
     } else {
         DRIVE_SET(opmode_display, opmode);
-        if (opmode == 8 && (controlword & (1u << 3))) {
+        if (opmode == 8 && power_state == 3) {
             DRIVE_SET(actual_position, target_position);
         }
-        if (opmode == 9 && (controlword & (1u << 3))) {
+        if (opmode == 9 && power_state == 3) {
             DRIVE_SET(actual_velocity, target_velocity);
         }
     }
+    DRIVE_SET(statusword, next_status);
 }
