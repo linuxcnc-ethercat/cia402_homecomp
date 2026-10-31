@@ -70,6 +70,23 @@ def wait_for(condition, timeout=8.0):
     return condition()
 
 
+def wait_for_homing_end(timeout):
+    """Wait for a stable idle gap, not a one-poll gap between sequences."""
+    deadline = time.time() + timeout
+    quiet_since = None
+    while time.time() < deadline:
+        poll()
+        if any(j["homing"] for j in s.joint[:2]):
+            quiet_since = None
+        else:
+            if quiet_since is None:
+                quiet_since = time.time()
+            if time.time() - quiet_since >= 0.2:
+                return True
+        time.sleep(0.002)
+    return False
+
+
 def machine_on():
     time.sleep(0.2)
     c.state(linuxcnc.STATE_ESTOP_RESET)
@@ -105,7 +122,7 @@ def finish_home(joint, timeout=10.0):
                value("cia402.0.stat-fault"), value("joint.0.cia-home"),
                value("joint.0.cia-enable-out"),
                value("joint.0.request-custom-homing")), flush=True)
-    ended = wait_for(lambda: not any(j["homing"] for j in s.joint[:2]), timeout)
+    ended = wait_for_homing_end(timeout)
     time.sleep(0.1)
     poll()
     check(ended, "homing did not finish for joint %d" % joint)
