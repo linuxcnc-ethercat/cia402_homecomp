@@ -57,7 +57,6 @@ jobs:
                   path: linuxcnc-ethercat
 
             - name: Install LinuxCNC build dependencies
-              if: steps.linuxcnc-cache.outputs.cache-hit != 'true'
               run: |
                   set -e
                   cd linuxcnc
@@ -76,12 +75,6 @@ jobs:
                       --disable-gtk \
                       --enable-non-distributable=yes
                   make -j2 default pycheck
-
-            - name: Install cached-build tools
-              if: steps.linuxcnc-cache.outputs.cache-hit == 'true'
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y yapps2
 
             - name: Build components
               env:
