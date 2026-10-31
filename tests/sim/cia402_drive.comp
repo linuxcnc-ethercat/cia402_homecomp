@@ -1,0 +1,130 @@
+/*
+ * Test-only virtual CiA402 drive for LinuxCNC HAL.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ */
+
+component cia402_drive "Test-only virtual CiA402 drive";
+
+pin in u32 controlword "CiA402 controlword";
+pin in s32 opmode "Requested operation mode";
+pin in s32 target-position "Target position for simple CSP";
+pin in s32 target-velocity "Target velocity for simple CSV";
+
+pin out u32 statusword "Simulated CiA402 statusword";
+pin out s32 opmode-display "Displayed operation mode";
+pin out s32 actual-position "Simulated actual position";
+pin out s32 actual-velocity "Simulated actual velocity";
+
+param rw s32 scenario = 0 "0 success, 1 homing error, 2 drive fault, 3 stall";
+param rw s32 homing-ticks = 50 "Cycles needed to finish homing";
+param rw s32 start-position = 100000 "Initial actual position";
+param rw s32 home-position = 0 "Homing target position";
+param rw s32 step-size = 1000 "Position change per homing cycle";
+
+variable int homing_active = 0;
+variable int previous_homing_request = 0;
+variable int faulted = 0;
+variable rtapi_s32 elapsed_ticks = 0;
+variable int initialized = 0;
+
+option default_count 1;
+
+function _;
+license "GPL";
+;;
+
+/* Operation enabled plus remote: bits 0, 1, 2, 4, 5, and 9. */
+#define STATUS_OPERATION_ENABLED 0x0237u
+/* Fault plus remote, with operation-enabled bits cleared. */
+#define STATUS_DRIVE_FAULT 0x0208u
+
+#if defined(HAL_API_VERSION) || defined(COMPONENT_TYPE_USER) || defined(HAL_BOOL)
+#define DRIVE_SET(pin, value) pin##_set(value)
+#else
+#define DRIVE_SET(pin, value) (pin = (value))
+#endif
+
+FUNCTION(_) {
+    int homing_request;
+    long long distance;
+    long long step;
+
+    if (!initialized) {
+        DRIVE_SET(actual_position, start_position);
+        DRIVE_SET(actual_velocity, 0);
+        DRIVE_SET(opmode_display, 0);
+        DRIVE_SET(statusword, STATUS_OPERATION_ENABLED);
+        initialized = 1;
+    }
+
+    homing_request = (opmode == 6) && ((controlword & 0x10u) != 0);
+
+    if (controlword & (1u << 7)) faulted = 0;
+
+    /* A new rising edge restarts the scenario and clears a latched fault. */
+    if (homing_request && !previous_homing_request) {
+        homing_active = 1;
+        elapsed_ticks = 0;
+        faulted = 0;
+    }
+    previous_homing_request = homing_request;
+
+    /* Withdrawing homing mode or bit 4 cancels an incomplete homing cycle. */
+    if (!homing_request) {
+        homing_active = 0;
+        elapsed_ticks = 0;
+    }
+
+    DRIVE_SET(statusword,
+        faulted ? STATUS_DRIVE_FAULT : STATUS_OPERATION_ENABLED);
+    DRIVE_SET(actual_velocity, 0);
+
+    if (homing_active) {
+        DRIVE_SET(opmode_display, 6);
+
+        /* Move toward home without overshooting, including negative steps. */
+        distance = (long long)home_position - (long long)actual_position;
+        step = step_size;
+        if (step < 0) step = -step;
+        if (distance > step) {
+            DRIVE_SET(actual_position, actual_position + (rtapi_s32)step);
+        } else if (distance < -step) {
+            DRIVE_SET(actual_position, actual_position - (rtapi_s32)step);
+        } else {
+            DRIVE_SET(actual_position, home_position);
+        }
+
+        elapsed_ticks++;
+
+        if (scenario == 2 && elapsed_ticks >= 25) {
+            /* Fail after 25 cycles so 10 ms task polling observes homing. */
+            faulted = 1;
+            homing_active = 0;
+            DRIVE_SET(statusword, STATUS_DRIVE_FAULT);
+        } else if (scenario != 3 && elapsed_ticks >= homing_ticks) {
+            homing_active = 0;
+            if (scenario == 1) {
+                /* Homing error wins even with target reached asserted. */
+                DRIVE_SET(statusword,
+                    statusword | (1u << 10) | (1u << 13));
+            } else {
+                DRIVE_SET(actual_position, home_position);
+                DRIVE_SET(statusword,
+                    statusword | (1u << 10) | (1u << 12));
+            }
+        }
+        /* Scenario 3 never completes and never sets bits 10, 12, or 13. */
+    } else {
+        DRIVE_SET(opmode_display, opmode);
+        if (opmode == 8 && (controlword & (1u << 3))) {
+            DRIVE_SET(actual_position, target_position);
+        }
+        if (opmode == 9 && (controlword & (1u << 3))) {
+            DRIVE_SET(actual_velocity, target_velocity);
+        }
+    }
+}

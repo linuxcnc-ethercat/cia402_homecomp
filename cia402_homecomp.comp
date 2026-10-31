@@ -1,539 +1,406 @@
-component cia402_homecomp "homing module template";
+component cia402_homecomp "CiA 402 drive-internal homing module";
 
 description """
-A homing module for cia402 devices buildable with halcompile.
-This module should be used with Dominic Braun's cia402.comp Ref: https://github.com/dbraun1981/hal-cia402
-which provides matching pins home, stat_homed and stat_homed
+Custom homing module for CiA 402 drives used with linuxcnc-ethercat's
+cia402 component.  The cia402 component remains the sole owner of the
+drive controlword and operation mode.  This module coordinates LinuxCNC
+homing, feedback, drive enable, timeout, and final position handling.
 
-\\fBHOMING_BASE\\fR must be #defined and must point to a valid homing.c file,
-an example of a customized homing module is built.  This module
-creates input hal pins joint.n.request-custom-homing that enables an
-alternate joint homing state machine for requested joints.  A hal output
-pin joint.N.is_cia402-homing verifies selection"
-
-
-If \\fBHOMING_BASE\\fR Is not #defined, an  actual homing scheme is
-\\fBnot\\fR implemented but all necessary functions are included as
-skeleton code.   (All joints are effectively homed at all times and
-cannot be unhomed).
-
-See the source code file: src/emc/motion/homing.c for the baseline
-implementation that includes all functions for the default \\fBhomemod\\fR
-module.
-
-This cia402 homing component can be built and installed with
-halcompile and then substituted for the default homing module
-(\\fBhomemod\\fR) using:\n
-Sor by inifile setting: \\fB[EMCMOT]HOMEMOD=user_homecomp\\fR
-
-\\fBNote:\\fRIf using a deb install:\n
-1) halcompile is provided by the package linuxcnc-uspace-dev\n
+Build with HOMING_BASE pointing at the matching LinuxCNC source tree's
+src/emc/motion/homing.c.  Load through [EMCMOT]HOMEMOD=cia402_homecomp.
 """;
 
-pin out bit is_module=1; //one pin is required to use halcompile)
+pin out bit is_module=1;
 
 license "GPL";
-author "Rod Webster";
-option  homemod;
-option  extra_setup;
+author "Rod Webster; linuxcnc-ethercat contributors";
+option homemod;
+option extra_setup;
 ;;
 
-/* To incorporate default homing.c file from a local git src tree:
-** enable #define HOMING_BASE set to the path to the current homing.c file.
-** (Note: CUSTOM_HOMEMODULE precludes duplicate api symbols)
-** (Edit myname as required for valid path)
-*/
+#include "homing_config.h"
+#ifndef HOMING_BASE
+#error "HOMING_BASE must name the matching LinuxCNC homing.c"
+#endif
 
-#define HOMING_BASE /home/rod/devt/linuxcnc-dev/src/emc/motion/homing.c
-
-#define STR(s)  #s
+#define STR(s) #s
 #define XSTR(s) STR(s)
-
-#include "motion.h"
-#include "homing.h"
-#include "cia402_homecomp.h"
-
-static char *home_parms;
-RTAPI_MP_STRING(home_parms,"Example home parms");
-
-// EXTRA_SETUP is executed before rtapi_app_main()
-EXTRA_SETUP() {
-    rtapi_print_msg(RTAPI_MSG_ERR, "HomeComp Started\n");
-    return 0;
-}
-
-//=====================================================================
-#ifdef  HOMING_BASE  // { begin CUSTOM example
 #define USE_HOMING_BASE XSTR(HOMING_BASE)
-
-// NOTE: CUSTOM_HOMEMODULE: disables duplicate symbols sourced from homing.c
 #define CUSTOM_HOMEMODULE
 #include USE_HOMING_BASE
 
+#include "cia402_homecomp.h"
+#include <string.h>
 
+#define CIA_OPMODE_HOMING 6
+#define CIA_DEFAULT_TIMEOUT_MS 30000
 
-static custom_home_local_data customH[EMCMOT_MAX_JOINTS];
+static cia402_joint_t *ciaJ;
+static double cia_servo_period;
+static int cia_comp_id;
 
-
-static custom_all_joints_home_data_t *custom_joint_home_data = 0;
-
-static int custom_makepins(int id,int njoints)
+EXTRA_SETUP()
 {
-    int jno,retval;
-    custom_one_joint_home_data_t *addr;
-
-    custom_joint_home_data = hal_malloc(sizeof(custom_all_joints_home_data_t));
-    if (custom_joint_home_data == 0) {
-        rtapi_print_msg(RTAPI_MSG_ERR, "HOMING: custom_all_joints_home_data_t malloc failed\n");
-        return -1;
-    }
-
-    retval = 0;
-    for (jno = 0; jno < njoints; jno++) {
-        addr = &(custom_joint_home_data->custom_jhd[jno]);
-
-        retval += hal_pin_bit_newf(HAL_IO, &(addr->request_custom_homing), id,
-                                  "joint.%d.request-custom-homing", jno);
-        retval += hal_pin_bit_newf(HAL_IN, &(addr->is_custom_homing), id,
-                                  "joint.%d.is-custom-homing", jno);
-        retval += hal_pin_bit_newf(HAL_IN, &(addr->custom_homing_finished), id,
-                                  "joint.%d.custom-homing-finished", jno);
-        retval += hal_pin_u32_newf(HAL_IN, &(addr->statusword), id,
-                                  "joint.%d.cia-statusword", jno);
-        retval += hal_pin_s32_newf(HAL_IN, (volatile int **)&(addr->opmode_display), id,
-                                  "joint.%d.cia-opmode-display", jno);
-        retval += hal_pin_s32_newf(HAL_IN, (volatile int **)&(addr->drv_actual_position), id,
-                                  "joint.%d.cia-drv-actual_position", jno);
-        retval += hal_pin_s32_newf(HAL_IN, (volatile int **)&(addr->drv_actual_velocity), id,
-                                  "joint.%d.cia-drv-actual-velocity", jno);                                 
-        retval += hal_pin_u32_newf(HAL_OUT, (volatile unsigned int **)&(addr->controlword), id,
-                                  "joint.%d.cia-controlword", jno);
-        retval += hal_pin_s32_newf(HAL_OUT, (volatile int **)&(addr->opmode), id,
-                                  "joint.%d.cia-opmode", jno);
-        retval += hal_pin_s32_newf(HAL_OUT, (volatile  int **)&(addr->drv_target_position), id,
-                                  "joint.%d.cia-drv-target-position", jno);
-        retval += hal_pin_s32_newf(HAL_OUT, (volatile  int **)&(addr->drv_target_velocity), id,
-                                  "joint.%d.cia-drv-target-velocity", jno);   
-		retval += hal_pin_bit_newf(HAL_IN, &(addr->cia_enable), id,
-                                  "joint.%d.cia-enable", jno);   
-		retval += hal_pin_float_newf(HAL_IN, (volatile double **)&(addr->cia_pos_cmd), id,
-                                  "joint.%d.cia-pos-cmd", jno);                                                                                                                       
-		retval += hal_pin_float_newf(HAL_IN, (volatile double **)&(addr->cia_velocity_cmd), id,
-                                  "joint.%d.cia-velocity-cmd", jno);                                                                                                                       
-		retval += hal_pin_float_newf(HAL_OUT, (volatile double **)&(addr->cia_pos_fb), id,
-                                  "joint.%d.cia-pos-fb", jno);                                                                                                                       
-		retval += hal_pin_float_newf(HAL_OUT, (volatile double **)&(addr->cia_velocity_fb), id,
-                                  "joint.%d.cia-velocity-fb", jno);                                                                                                                       
-        retval += hal_pin_bit_newf(HAL_OUT, &(addr->cia_drv_fault), id,
-                                  "joint.%d.cia-drv-fault", jno);
-        retval += hal_pin_bit_newf(HAL_IO, &(addr->cia_home), id,
-                                  "joint.%d.cia-home", jno);
-        retval += hal_pin_bit_newf(HAL_OUT, &(addr->stat_homed), id,
-                                  "joint.%d.cia-stat-homed", jno);
-        retval += hal_pin_bit_newf(HAL_OUT, &(addr->stat_homing), id,
-                                  "joint.%d.cia-stat-homing", jno);
-
-                                  
-    }
-    return retval;
+    (void)__comp_inst;
+    (void)prefix;
+    (void)extra_arg;
+    return 0;
 }
 
-static void custom_read_homing_in_pins(int njoints)
+// Pin storage uses the legacy pointer declarations on both HAL APIs.
+// lcec_hal_compat.h maps access to opaque references on the new API.
+static int custom_pin_new(hal_type_t type, hal_pin_dir_t dir,
+                          void **data_ptr_addr, double def,
+                          const char *name)
+{
+#ifdef LCEC_HAL_NEW_API
+    switch (type) {
+    case HAL_BIT:
+        return hal_pin_new_bool(cia_comp_id, dir,
+            (hal_bool_t *)data_ptr_addr, def != 0, "%s", name);
+    case HAL_FLOAT:
+        return hal_pin_new_real(cia_comp_id, dir,
+            (hal_real_t *)data_ptr_addr, def, "%s", name);
+    case HAL_S32:
+        return hal_pin_new_si32(cia_comp_id, dir,
+            (hal_sint_t *)data_ptr_addr, (int32_t)def, "%s", name);
+    case HAL_U32:
+        return hal_pin_new_ui32(cia_comp_id, dir,
+            (hal_uint_t *)data_ptr_addr, (uint32_t)def, "%s", name);
+    default:
+        return -EINVAL;
+    }
+#else
+    int r = hal_pin_new(name, type, dir, data_ptr_addr, cia_comp_id);
+    if (r) return r;
+    switch (type) {
+    case HAL_BIT:
+        LCEC_PIN_BIT_SET((hal_bit_t *)*data_ptr_addr, def != 0);
+        break;
+    case HAL_FLOAT:
+        LCEC_PIN_FLOAT_SET((hal_float_t *)*data_ptr_addr, def);
+        break;
+    case HAL_S32:
+        LCEC_PIN_S32_SET((hal_s32_t *)*data_ptr_addr, (int32_t)def);
+        break;
+    case HAL_U32:
+        LCEC_PIN_U32_SET((hal_u32_t *)*data_ptr_addr, (uint32_t)def);
+        break;
+    default:
+        return -EINVAL;
+    }
+    return 0;
+#endif
+}
+
+#define CHK(expr) do { int _r = (expr); if (_r) return _r; } while (0)
+
+static int custom_makepins(int id, int njoints)
 {
     int jno;
-    custom_one_joint_home_data_t *addr;
+    char name[HAL_NAME_LEN + 1];
+
+    cia_comp_id = id;
+    if (njoints <= 0) return 0;
+    ciaJ = hal_malloc(sizeof(*ciaJ) * njoints);
+    if (!ciaJ) return -ENOMEM;
+    memset(ciaJ, 0, sizeof(*ciaJ) * njoints);
+
     for (jno = 0; jno < njoints; jno++) {
-		addr = &(custom_joint_home_data->custom_jhd[jno]);
-		customH[jno].request_custom_homing = *(addr->request_custom_homing);   // IO
+        cia402_joint_t *c = &ciaJ[jno];
+#define PIN(field, type, dir, def, suffix)                              \
+        do {                                                            \
+            rtapi_snprintf(name, sizeof(name), "joint.%d.cia-" suffix, jno); \
+            CHK(custom_pin_new(type, dir, (void **)&c->field, def, name)); \
+        } while (0)
+        rtapi_snprintf(name, sizeof(name),
+                       "joint.%d.request-custom-homing", jno);
+        CHK(custom_pin_new(HAL_BIT, HAL_IN,
+            (void **)&c->request_custom_homing, 0, name));
+        rtapi_snprintf(name, sizeof(name),
+                       "joint.%d.is-custom-homing", jno);
+        CHK(custom_pin_new(HAL_BIT, HAL_OUT,
+            (void **)&c->is_custom_homing, 0, name));
 
-		customH[jno].is_custom_homing = *(addr->is_custom_homing);             // IN
-		customH[jno].custom_homing_finished = *(addr->custom_homing_finished); // IN
-		customH[jno].statusword = *(addr->statusword);                   // IN - Drives CiA402 Statusword, index 0x6041   
-		customH[jno].Status.Word = *(addr->statusword);                  //    - bitmapped status overlay, not a pin
-		customH[jno].opmode_display = *(addr->opmode_display);           // IN - Drives Modes of Operation feedback register, index 0x6061
-		customH[jno].opmode = *(addr->opmode);                           // IN - Drives Modes of Operation feedback register, index 0x6061
-		customH[jno].drv_actual_position = *(addr->drv_actual_position); // IN - Drives actual Position, index 0x6064
-		customH[jno].drv_actual_velocity = *(addr->drv_actual_velocity); // IN - Drives actual Velocity, index 0x606C
-		customH[jno].enable = *(addr->cia_enable);                       // IN - true enables the Drive
-		customH[jno].pos_cmd = *(addr->cia_pos_cmd);                     // IN - target Position, from Motion or PID	
-		customH[jno].velocity_cmd = *(addr->cia_velocity_cmd);           // IN - target Velocity, from Motion or PID
-		customH[jno].cia_home      = *(addr->cia_home);                  // IO - true starts the Drives internal home procedure[jno].home_sw     \
-		customH[jno].enable = *(addr->cia_enable);                       // IN - true enables the Drive
-		customH[jno].pos_cmd = *(addr->cia_pos_fb);                      // IN - Feedback, from Motion or PID	
-		customH[jno].velocity_cmd = *(addr->cia_velocity_fb);            // IN - target Velocity, from Motion or PID
-		customH[jno].cia_home      = *(addr->cia_home);                  // IO - true starts the Drives internal home procedure
+        PIN(cia_enable_in, HAL_BIT, HAL_IN, 0, "enable-in");
+        PIN(cia_enable_out, HAL_BIT, HAL_OUT, 0, "enable-out");
+        PIN(cia_pos_cmd, HAL_FLOAT, HAL_IN, 0, "pos-cmd");
+        PIN(cia_velocity_cmd, HAL_FLOAT, HAL_IN, 0, "velocity-cmd");
+        PIN(cia_pos_fb_in, HAL_FLOAT, HAL_IN, 0, "pos-fb-in");
+        PIN(cia_velocity_fb_in, HAL_FLOAT, HAL_IN, 0, "velocity-fb-in");
+        PIN(cia_pos_fb_out, HAL_FLOAT, HAL_OUT, 0, "pos-fb-out");
+        PIN(cia_velocity_fb_out, HAL_FLOAT, HAL_OUT, 0, "velocity-fb-out");
+        PIN(cia_home, HAL_BIT, HAL_IO, 0, "home");
+        PIN(cia_stat_homed, HAL_BIT, HAL_IN, 0, "stat-homed");
+        PIN(cia_stat_homing, HAL_BIT, HAL_IN, 0, "stat-homing");
+        PIN(cia_stat_homing_error, HAL_BIT, HAL_IN, 0, "stat-homing-error");
+        PIN(cia_stat_fault, HAL_BIT, HAL_IN, 0, "stat-fault");
+        PIN(cia_opmode_display, HAL_S32, HAL_IN, 0, "opmode-display");
+        PIN(cia_state, HAL_S32, HAL_OUT, 0, "state");
+        PIN(cia_timeout_ms, HAL_U32, HAL_IN, CIA_DEFAULT_TIMEOUT_MS,
+            "timeout-ms");
+#undef PIN
     }
+    return 0;
 }
 
-static void custom_write_homing_out_pins(int njoints)
+static bool custom_selected(int jno)
 {
-    int jno;
-    custom_one_joint_home_data_t *addr;
-    for (jno = 0; jno < njoints; jno++) {
-        addr = &(custom_joint_home_data->custom_jhd[jno]);
-        *(addr->request_custom_homing) = customH[jno].request_custom_homing; // IO
-        
-        *(addr->is_custom_homing) = customH[jno].is_custom_homing;             // IN
-		 *(addr->custom_homing_finished) = customH[jno].custom_homing_finished; // IN
-		//*(addr->statusword) = customH[jno].statusword;                 // IN - Drives CiA402 Statusword, index 0x6041   
-		*(addr->statusword) = customH[jno].Status.Word;                  //    - bitmapped status overlay, not a pin
-		*(addr->opmode_display) = customH[jno].opmode_display;           // IN - Drives Modes of Operation feedback register, index 0x6061
-		*(addr->opmode) = customH[jno].opmode;                           // IN - Drives Modes of Operation feedback register, index 0x6061
-		*(addr->drv_actual_position) = customH[jno].drv_actual_position; // IN - Drives actual Position, index 0x6064
-		*(addr->drv_actual_velocity) = customH[jno].drv_actual_velocity; // IN - Drives actual Velocity, index 0x606C
-		*(addr->cia_enable) = customH[jno].enable;                       // IN - true enables the Drive
-		*(addr->cia_pos_cmd) = customH[jno].pos_cmd;                     // IN - target Position, from Motion or PID	
-		*(addr->cia_velocity_cmd) = customH[jno].velocity_cmd;           // IN - target Velocity, from Motion or PID
-		*(addr->cia_home) = customH[jno].cia_home;                       // IO - true starts the Drives internal home procedure[jno].home_sw     \
-		*(addr->cia_enable) = customH[jno].enable;                       // IN - true enables the Drive
-		*(addr->cia_pos_fb) = customH[jno].pos_fb;                       // IN - feedback position, from Motion or PID	
-		*(addr->cia_velocity_fb) = customH[jno].velocity_fb;             // IN - feedback Velocity, from Motion or PID
-		*(addr->cia_home)= customH[jno].cia_home;                        // IO - 
-    }
+    return LCEC_PIN_BIT_GET(ciaJ[jno].request_custom_homing) ||
+           ciaJ[jno].state != CIA_HOME_IDLE;
 }
 
-static int custom_1joint_state_machine(int joint_num){
-	
-	static custom_home_state_t chomestate[EMCMOT_MAX_JOINTS] = {0};
-    custom_home_state_t nextcstate = CUSTOM_IDLE;
-
-    if ( H[joint_num].home_state == HOME_IDLE){
-      //rtapi_print(".");
-      return(0);
-    }
-    if ((H[joint_num].home_state == HOME_START) && (chomestate[joint_num] == CUSTOM_IDLE) ) {
- //  if (H[joint_num].home_state == HOME_START){
-        H[joint_num].homing = 1;
-        H[joint_num].homed  = 0;
-        rtapi_print_msg(RTAPI_MSG_ERR, "Joint %d: state machine started HOME_START\n",H[joint_num]);
-        chomestate[joint_num] = CUSTOM_BEGIN; // set first non-idle custom_home_state
-    }
-
-    switch (chomestate[joint_num]) {
-      case CUSTOM_BEGIN:
-        rtapi_print("state machine started \n");
-        customH[joint_num].opmode = 6;
-        customH[joint_num].Control.b.StartHome = 1;
-        //customH[joint_num].request_custom_homing = 1;
-        chomestate[joint_num] = CUSTOM_INIT;
-        break;
-      case CUSTOM_INIT:	
-        // check that the drive has entered homing in case it is not instant
-        rtapi_print("state machine waiting for homing command to become active \n");
-		chomestate[joint_num] = CUSTOM_RUNNING;
-		rtapi_print("Home initialised, ready to start homing");
-		break;
-      case CUSTOM_RUNNING:
-        // rtapi_print("servo drive did hear and is now homing \n");
-        // RODW - the cia402 comp sets pos_fb = pos_cmd while internal homing to prevent following errors. 
-		customH[joint_num].pos_fb =  customH[joint_num].pos_cmd;
-		customH[joint_num].velocity_fb =  customH[joint_num].velocity_cmd;
-        //if(customH[joint_num].custom_homing_finished)
-		if(customH[joint_num].Status.b.TargetReached == 1){
-			rtapi_print("Homing target reached\n");
-			chomestate[joint_num] = CUSTOM_FINISH;
-		}	   
-        break;
-      case CUSTOM_FINISH:
-		//rtapi_print("state machine finished \n");
-		joints[joint_num].pos_cmd = 0.0;
-		joints[joint_num].free_tp.curr_pos = 0.0;
-		joints[joint_num].motor_pos_cmd = 0.0;
-		H[joint_num].homing = 0;
-		H[joint_num].homed  = 1;
-		H[joint_num].home_state = HOME_IDLE;
-		chomestate[joint_num] = CUSTOM_IDLE;
-		customH[joint_num].request_custom_homing = 0;
-		return 0; // finished custom_home_states
-		break;
-      case CUSTOM_IDLE:  // RODW -this has been set as the default when chomestate[joint_num] was defined but should never be set during the switch()
-      default:
-        rtapi_print("Unhandled custom_home_state: %d\n",chomestate[joint_num]);
-    }
-    return 1; // return 1 if busy
-}
-
-// api functions below augment base_*() functions with custom code
-int homing_init(int id,
-                double servo_period,
-                int n_joints,
-                int n_extrajoints,
-                emcmot_joint_t* pjoints)
+static bool custom_holding_feedback(int jno)
 {
-    int retval;
-    retval = base_homing_init(id,
-                              servo_period,
-                              n_joints,
-                              n_extrajoints,
-                              pjoints);
-    retval += custom_makepins(id,n_joints);
-    return retval;
-} // homing_init()
+    cia_home_state_t state = ciaJ[jno].state;
+    return state == CIA_HOME_WAIT_MODE || state == CIA_HOME_RUNNING;
+}
+
+static void custom_update_outputs(int jno)
+{
+    cia402_joint_t *c = &ciaJ[jno];
+    bool homing = custom_holding_feedback(jno);
+
+    LCEC_PIN_BIT_SET(c->is_custom_homing,
+        LCEC_PIN_BIT_GET(c->request_custom_homing));
+    LCEC_PIN_BIT_SET(c->cia_home, homing);
+    LCEC_PIN_S32_SET(c->cia_state, c->state);
+    LCEC_PIN_BIT_SET(c->cia_enable_out,
+        LCEC_PIN_BIT_GET(c->cia_enable_in) && !c->enable_inhibit);
+
+    if (homing) {
+        LCEC_PIN_FLOAT_SET(c->cia_pos_fb_out,
+            LCEC_PIN_FLOAT_GET(c->cia_pos_cmd));
+        LCEC_PIN_FLOAT_SET(c->cia_velocity_fb_out,
+            LCEC_PIN_FLOAT_GET(c->cia_velocity_cmd));
+    } else {
+        LCEC_PIN_FLOAT_SET(c->cia_pos_fb_out,
+            LCEC_PIN_FLOAT_GET(c->cia_pos_fb_in));
+        LCEC_PIN_FLOAT_SET(c->cia_velocity_fb_out,
+            LCEC_PIN_FLOAT_GET(c->cia_velocity_fb_in));
+    }
+}
+
+// Synchronize LinuxCNC to the actual scaled motor position.  At successful
+// homing, choose the offset that makes the reference equal HOME_OFFSET.
+// On abort, preserve the existing coordinate offset.
+static void custom_sync_position(int jno, bool at_home)
+{
+    cia402_joint_t *c = &ciaJ[jno];
+    emcmot_joint_t *joint = &joints[jno];
+    double actual = LCEC_PIN_FLOAT_GET(c->cia_pos_fb_in);
+
+    if (at_home) {
+        joint->motor_offset = actual - H[jno].home_offset;
+    }
+    joint->motor_pos_fb = actual;
+    joint->pos_fb = actual - (joint->backlash_filt + joint->motor_offset);
+    joint->pos_cmd = joint->pos_fb;
+    joint->motor_pos_cmd = actual;
+    joint->free_tp.curr_pos = joint->pos_fb;
+    joint->free_tp.pos_cmd = joint->pos_fb;
+    joint->free_tp.enable = 0;
+}
+
+static void custom_abort(int jno, const char *reason)
+{
+    cia402_joint_t *c = &ciaJ[jno];
+    if (c->state == CIA_HOME_IDLE) return;
+
+    rtapi_print_msg(RTAPI_MSG_ERR,
+        "cia402_homecomp: joint %d homing aborted: %s\n", jno, reason);
+    c->enable_inhibit = 1;
+    c->state = CIA_HOME_BASE;
+    custom_sync_position(jno, false);
+    H[jno].home_state = HOME_ABORT;
+}
+
+static void custom_finish_drive_homing(int jno)
+{
+    cia402_joint_t *c = &ciaJ[jno];
+    custom_sync_position(jno, true);
+    c->state = CIA_HOME_BASE;
+    if (H[jno].home_flags & HOME_NO_FINAL_MOVE) {
+        H[jno].home_state = HOME_FINISHED;
+    } else {
+        H[jno].home_state = HOME_FINAL_MOVE_START;
+    }
+}
+
+static int custom_1joint_state_machine(int jno)
+{
+    cia402_joint_t *c = &ciaJ[jno];
+
+    if (c->state == CIA_HOME_BASE) {
+        int busy = base_1joint_state_machine(jno);
+        if (H[jno].home_state == HOME_IDLE) c->state = CIA_HOME_IDLE;
+        return busy;
+    }
+
+    if (H[jno].home_state == HOME_IDLE) {
+        c->state = CIA_HOME_IDLE;
+        return 0;
+    }
+
+    if (H[jno].home_state == HOME_START && c->state == CIA_HOME_IDLE) {
+        H[jno].homing = 1;
+        H[jno].homed = 0;
+        joints[jno].free_tp.enable = 0;
+        c->enable_inhibit = 0;
+        c->elapsed_ns = 0;
+        c->state = CIA_HOME_WAIT_MODE;
+        return 1;  // Let cia402 see the home request first.
+    }
+
+    if (c->state != CIA_HOME_WAIT_MODE && c->state != CIA_HOME_RUNNING) {
+        c->elapsed_ns = 0;
+        c->state = CIA_HOME_WAIT_MODE;
+    }
+
+    c->elapsed_ns += (int64_t)(cia_servo_period * 1000000000.0 + 0.5);
+
+    if (LCEC_PIN_BIT_GET(c->cia_stat_fault)) {
+        custom_abort(jno, "drive fault");
+    } else if (LCEC_PIN_BIT_GET(c->cia_stat_homing_error)) {
+        custom_abort(jno, "drive reported homing error");
+    } else if (LCEC_PIN_BIT_GET(c->cia_stat_homed)) {
+        custom_finish_drive_homing(jno);
+    } else {
+        uint32_t timeout_ms = LCEC_PIN_U32_GET(c->cia_timeout_ms);
+        if (timeout_ms &&
+            c->elapsed_ns >= (int64_t)timeout_ms * 1000000LL) {
+            custom_abort(jno, "timeout");
+        } else if (LCEC_PIN_S32_GET(c->cia_opmode_display) == CIA_OPMODE_HOMING) {
+            c->state = CIA_HOME_RUNNING;
+        }
+    }
+    return 1;
+}
+
+int homing_init(int id, double servo_period, int n_joints,
+                int n_extrajoints, emcmot_joint_t *pjoints)
+{
+    cia_servo_period = servo_period;
+    CHK(base_homing_init(id, servo_period, n_joints,
+                         n_extrajoints, pjoints));
+    CHK(custom_makepins(id, n_joints));
+    return 0;
+}
 
 void read_homing_in_pins(int njoints)
 {
+    int jno;
     base_read_homing_in_pins(njoints);
-    custom_read_homing_in_pins(njoints);
+    if (!ciaJ) return;
+    for (jno = 0; jno < njoints; jno++) custom_update_outputs(jno);
 }
 
 void write_homing_out_pins(int njoints)
 {
+    int jno;
     base_write_homing_out_pins(njoints);
-    custom_write_homing_out_pins(njoints);
+    if (!ciaJ) return;
+    for (jno = 0; jno < njoints; jno++) {
+        // Track any residual drive motion after an abort while keeping the
+        // drive disabled and the joint unhomed.
+        if (ciaJ[jno].enable_inhibit && H[jno].home_state == HOME_IDLE) {
+            custom_sync_position(jno, false);
+        }
+        custom_update_outputs(jno);
+    }
 }
 
-/* do_homing() is adapted from homing.c:base_do_homing() augmented
-** with support for custom homing as specified on hal input pin:
-** joint.n.request-custom-homing and echoed on hal output pin
-** joint.n.is-custom-homing.
-*/
 bool do_homing(void)
 {
-    int  joint_num;
-    int  homing_flag = 0;
-    bool beginning_allhomed = get_allhomed();
+    int jno;
+    int busy = 0;
+    bool beginning_allhomed = base_get_allhomed();
 
     do_homing_sequence();
-    /* loop thru joints, treat each one individually */
-    for (joint_num = 0; joint_num < all_joints; joint_num++) {
-
-        if (!H[joint_num].joint_in_sequence)            { continue; }
-        if (!GET_JOINT_ACTIVE_FLAG(&joints[joint_num])) { continue; }
-		if (customH[joint_num].is_custom_homing) {
-			// CUSTOM joint homing state machine (for CIA402 drives)
-			homing_flag += custom_1joint_state_machine(joint_num);
+    for (jno = 0; jno < all_joints; jno++) {
+        if (ciaJ && ciaJ[jno].state != CIA_HOME_IDLE &&
+            H[jno].home_state == HOME_IDLE) {
+            if (!H[jno].homed && !ciaJ[jno].enable_inhibit) {
+                custom_sync_position(jno, false);
+            }
+            ciaJ[jno].state = CIA_HOME_IDLE;
+        }
+        if (!H[jno].joint_in_sequence) continue;
+        if (!GET_JOINT_ACTIVE_FLAG(&joints[jno])) continue;
+        if (ciaJ && custom_selected(jno)) {
+            busy += custom_1joint_state_machine(jno);
         } else {
-            // DEFAULT joint homing state machine:
-            homing_flag += base_1joint_state_machine(joint_num);
+            busy += base_1joint_state_machine(jno);
         }
     }
-    if ( homing_flag > 0 ) { /* one or more joint is homing */
+    if (busy > 0) {
         homing_active = 1;
-    } else { /* is a homing sequence in progress? */
-        if (sequence_state == HOME_SEQUENCE_IDLE) {
-            /* no, single joint only, we're done */
-            homing_active = 0;
-        }
+    } else if (sequence_state == HOME_SEQUENCE_IDLE) {
+        homing_active = 0;
     }
-    // return 1 if homing completed this period
-    if (!beginning_allhomed && get_allhomed()) {homing_active=0; return 1;}
+    if (!beginning_allhomed && base_get_allhomed()) {
+        homing_active = 0;
+        return 1;
+    }
     return 0;
 }
 
-//===============================================================================
-// functions below use unmodified base_*() implementation
-bool get_allhomed(void)                   { return base_get_allhomed(); }
-bool get_homed(int jno)                   { return base_get_homed(jno); }
-bool get_home_is_idle(int jno)            { return base_get_home_is_idle(jno); }
-bool get_home_is_synchronized(int jno)    { return base_get_home_is_synchronized(jno); }
-bool get_home_needs_unlock_first(int jno) { return base_get_home_needs_unlock_first(jno); }
-int  get_home_sequence(int jno)           { return base_get_home_sequence(jno); }
-bool get_homing(int jno)                  { return base_get_homing(jno); }
+bool get_allhomed(void)                       { return base_get_allhomed(); }
+bool get_homed(int jno)                       { return base_get_homed(jno); }
+bool get_home_is_idle(int jno)                { return base_get_home_is_idle(jno); }
+bool get_home_is_synchronized(int jno)        { return base_get_home_is_synchronized(jno); }
+bool get_home_needs_unlock_first(int jno)     { return base_get_home_needs_unlock_first(jno); }
+int  get_home_sequence(int jno)               { return base_get_home_sequence(jno); }
+bool get_homing(int jno)                      { return base_get_homing(jno); }
 bool get_homing_at_index_search_wait(int jno) { return base_get_homing_at_index_search_wait(jno); }
 bool get_homing_is_active(void)               { return base_get_homing_is_active(); }
 bool get_index_enable(int jno)                { return base_get_index_enable(jno); }
 
-void do_home_joint(int jno)                        { base_do_home_joint(jno); }
-void do_cancel_homing(int jno)                     { base_do_cancel_homing(jno); }
-void set_unhomed(int jno, motion_state_t motstate) { base_set_unhomed(jno,motstate); }
-void set_joint_homing_params(int    jno,
-                             double offset,
-                             double home,
-                             double home_final_vel,
-                             double home_search_vel,
-                             double home_latch_vel,
-                             int    home_flags,
-                             int    home_sequence,
-                             bool   volatile_home
-                             )
+void do_home_joint(int jno) { base_do_home_joint(jno); }
+
+void do_cancel_homing(int jno)
 {
-      base_set_joint_homing_params(jno,
-                                   offset,
-                                   home,
-                                   home_final_vel,
-                                   home_search_vel,
-                                   home_latch_vel,
-                                   home_flags,
-                                   home_sequence,
-                                   volatile_home);
-}
-void update_joint_homing_params(int    jno,
-                                double offset,
-                                double home,
-                                int    home_sequence
-                                )
-{
-     base_update_joint_homing_params (jno,
-                                      offset,
-                                      home,
-                                      home_sequence
-                                      );
-}
-//           end   CUSTOM example
-//=====================================================================
-#else // } { begin SKELETON example minimal api implementation
-static emcmot_joint_t  *joints;
-
-// data for per-joint homing-specific hal pins:
-typedef struct {
-    hal_bit_t *home_sw;      // home switch input
-    hal_bit_t *homing;       // joint is homing
-    hal_bit_t *homed;        // joint was homed
-    hal_bit_t *index_enable; // motmod sets: request reset on index
-                             //        encoder clears: index arrived
-    hal_s32_t *home_state;   // homing state machine state
-    
-} one_joint_home_data_t;
-
-typedef struct {
-    one_joint_home_data_t jhd[EMCMOT_MAX_JOINTS];custom_one
-    
-} all_joints_home_data_t;
-
-static all_joints_home_data_t *joint_home_data = 0;
-
-static int makepins(int id,int njoints)
-{
-    // home_pins needed to work with configs expecting them:
-    int jno,retval;
-    one_joint_home_data_t *addr;
-
-    joint_home_data = hal_malloc(sizeof(all_joints_home_data_t));
-    if (joint_home_data == 0) {
-        rtapi_print_msg(RTAPI_MSG_ERR, "HOMING: all_joints_home_data_t malloc failed\n");
-        return -1;
+    if (ciaJ && jno >= 0 && jno < all_joints && custom_selected(jno)) {
+        custom_abort(jno, "cancelled");
     }
-
-    retval = 0;
-    for (jno = 0; jno < njoints; jno++) {
-        addr = &(joint_home_data->jhd[jno]);
-
-        retval += hal_pin_bit_newf(HAL_IN, &(addr->home_sw), id,
-                                  "joint.%d.home-sw-in", jno);
-        retval += hal_pin_bit_newf(HAL_OUT, &(addr->homing), id,
-                                  "joint.%d.homing", jno);
-        retval += hal_pin_bit_newf(HAL_OUT, &(addr->homed), id,
-                                  "joint.%d.homed", jno);
-        retval += hal_pin_s32_newf(HAL_OUT, &(addr->home_state), id,
-                                  "joint.%d.home-state", jno);
-        retval += hal_pin_bit_newf(HAL_IO, &(addr->index_enable), id,
-                                  "joint.%d.index-enable", jno);
-		retval += hal_pin_s32_newf(HAL_OUT, &(addr->tperiod), id,
-                                  "joint.%d.cia-period", jno);  
-        retval += hal_pin_u32_newf(HAL_IN, &(addr->statusword), id,
-                                  "joint.%d.cia-statusword", jno);
-        retval += hal_pin_s32_newf(HAL_IN, (volatile int **)&(addr->opmode_display), id,
-                                  "joint.%d.cia-opmode-display", jno);
-        retval += hal_pin_s32_newf(HAL_IN, (volatile int **)&(addr->drv_actual_position), id,
-                                  "joint.%d.cia-drv-actual-position", jno);
-        retval += hal_pin_s32_newf(HAL_IN, (volatile int **)&(addr->drv_actual_velocity), id,
-                                  "joint.%d.cia-drv-actual-velocity", jno);                                 
-        retval += hal_pin_u32_newf(HAL_OUT, (volatile unsigned int **)&(addr->controlword), id,
-                                  "joint.%d.cia-controlword", jno);
-        retval += hal_pin_s32_newf(HAL_OUT, (volatile int **)&(addr->opmode), id,
-                                  "joint.%d.cia-opmode", jno);
-        retval += hal_pin_s32_newf(HAL_OUT, (volatile  int **)&(addr->drv_target_position), id,
-                                  "joint.%d.cia-drv-target-position", jno);
-        retval += hal_pin_s32_newf(HAL_OUT, (volatile  int **)&(addr->drv_target_velocity), id,
-                                  "joint.%d.cia-drv-target-velocity", jno);   
-		retval += hal_pin_bit_newf(HAL_IN, &(addr->cia_enable), id,
-                                  "joint.%d.cia-enable", jno);   
-		retval += hal_pin_float_newf(HAL_IN, (volatile double **)&(addr->cia_pos_cmd), id,
-                                  "joint.%d.cia-pos-cmd", jno);                                                                                                                       
-		retval += hal_pin_float_newf(HAL_IN, (volatile double **)&(addr->cia_velocity_cmd), id,
-                                  "joint.%d.cia-velocity-cmd", jno);                                                                                                                       
-		retval += hal_pin_float_newf(HAL_OUT, (volatile double **)&(addr->cia_pos_fb), id,
-                                  "joint.%d.cia-pos-fb", jno);                                                                                                                       
-		retval += hal_pin_float_newf(HAL_OUT, (volatile double **)&(addr->cia_velocity_fb), id,
-                                  "joint.%d.cia-velocity-fb", jno);                                                                                                                       
-        retval += hal_pin_bit_newf(HAL_OUT, &(addr->cia_drv_fault), id,
-                                  "joint.%d.cia-drv-fault", jno);
-        retval += hal_pin_bit_newf(HAL_IO, &(addr->cia_home), id,
-                                  "joint.%d.cia-home", jno);
-        retval += hal_pin_bit_newf(HAL_OUT, &(addr->stat_homed), id,
-                                  "joint.%d.cia-stat-homed", jno);
-        retval += hal_pin_bit_newf(HAL_OUT, &(addr->stat_homing), id,
-                                  "joint.%d.cia-stat-homing", jno);                                  
-                                  
-    }
-    return retval;
+    base_do_cancel_homing(jno);
 }
-// All (skeleton) functions required for homing api follow:
-void homeMotFunctions(void(*pSetRotaryUnlock)(int,int)
-                     ,int (*pGetRotaryIsUnlocked)(int)
-                     )
-{ return; }
 
-int  homing_init(int id,
-                 double servo_period,
-                 int n_joints,
-                 int n_extrajoints,
-                 emcmot_joint_t* pjoints) {
-     joints = pjoints;
-     return makepins(id,n_joints);
-}
-bool do_homing(void)                                 {return 1;}
-bool get_allhomed()                                  {return 1;}
-bool get_homed(int jno)                              {return 1;}
-bool get_home_is_idle(int jno)                       {return 1;}
-bool get_home_is_synchronized(int jno)               {return 0;}
-bool get_home_needs_unlock_first(int jno)            {return 0;}
-int  get_home_sequence(int jno)                      {return 0;}
-bool get_homing(int jno)                             {return 0;}
-bool get_homing_at_index_search_wait(int jno)        {return 0;}
-bool get_homing_is_active()                          {return 0;}
-bool get_index_enable(int jno)                       {return 0;}
-void read_homing_in_pins(int njoints)                {return;}
-void do_home_joint(int jno)                          {return;}
-void set_unhomed(int jno,motion_state_t motstate)    {return;}
-void do_cancel_homing(int jno)                       {return;}
-void set_joint_homing_params(int    jno,
-                             double offset,
-                             double home,
-                             double home_final_vel,
-                             double home_search_vel,
-                             double home_latch_vel,
-                             int    home_flags,
-                             int    home_sequence,
-                             bool   volatile_home
-                             )                       {return;}
-void update_joint_homing_params (int    jno,
-                                 double offset,
-                                 double home,
-                                 int    home_sequence
-                                )                    {return;}
-void write_homing_out_pins(int njoints)              
+void set_unhomed(int jno, motion_state_t motstate)
 {
-	int jno;
-    one_joint_home_data_t *addr;
-    for (jno = 0; jno < njoints; jno++) {
-    *(addr->home_state)   = H[jno].home_state;     // OUT
-    *(addr->index_enable) = H[jno].index_enable;   // IO
-	*(addr->controlword) = H[jno].controlword;     // OUT
-	H[jno].Control.Word = H[jno].controlword;      // Save status to bitmapped struct
-	*(addr->opmode) = H[jno].opmode;               // OUT
-	*(addr->opmode-display = H[jno].cia-opmode-display; // OUT  
-	*(addr->cia_pos_fb) = H[jno].pos_fb;           // OUT                
-	*(addr->cia_velocity_fb) = H[jno].velocity_fb; // OUT                
-	*(addr->drv_target_position) = H[jno].drv_target_position; // OUT                
-	*(addr->cia_pos_fb) = H[jno].pos_fb;           // OUT                
-	*(addr->cia_velocity_fb) = H[jno].velocity_fb; // OUT               
-	*(addr->cia_drv_fault) = H[jno].drv_fault;     // OUT  
-	*(addr->cia_home) = H[jno].cia_home; 		   // OUT 
-	*(addr->stat_homed) = H[jno].stat_homed;       // OUT 
-	*(addr->stat_homing) = H[jno].stat_homing;     // OUT
-    }
-
-
-	}
-	return;
+    base_set_unhomed(jno, motstate);
 }
-#endif  // } end SKELETON example minimal api implementation
-//=====================================================================
 
-// all home functions for homing api
+#ifdef CIA402_HOMING_HAS_DISTANCES
+void set_joint_homing_params(int jno, double offset, double home,
+                             double home_final_vel, double home_search_vel,
+                             double home_latch_vel, double home_search_dist,
+                             double home_latch_dist, int home_flags,
+                             int home_sequence, bool volatile_home)
+{
+    base_set_joint_homing_params(jno, offset, home, home_final_vel,
+        home_search_vel, home_latch_vel, home_search_dist, home_latch_dist,
+        home_flags, home_sequence, volatile_home);
+}
+#else
+void set_joint_homing_params(int jno, double offset, double home,
+                             double home_final_vel, double home_search_vel,
+                             double home_latch_vel, int home_flags,
+                             int home_sequence, bool volatile_home)
+{
+    base_set_joint_homing_params(jno, offset, home, home_final_vel,
+        home_search_vel, home_latch_vel, home_flags, home_sequence,
+        volatile_home);
+}
+#endif
+
+void update_joint_homing_params(int jno, double offset, double home,
+                                int home_sequence)
+{
+    base_update_joint_homing_params(jno, offset, home, home_sequence);
+}
+
 EXPORT_SYMBOL(homeMotFunctions);
-
 EXPORT_SYMBOL(homing_init);
 EXPORT_SYMBOL(do_homing);
 EXPORT_SYMBOL(get_allhomed);
@@ -554,8 +421,7 @@ EXPORT_SYMBOL(set_joint_homing_params);
 EXPORT_SYMBOL(update_joint_homing_params);
 EXPORT_SYMBOL(write_homing_out_pins);
 
+#undef CUSTOM_HOMEMODULE
+#undef USE_HOMING_BASE
 #undef XSTR
 #undef STR
-#undef HOMING_BASE
-#undef USE_HOMING_BASE
-#undef CUSTOM_HOMEMODULE
