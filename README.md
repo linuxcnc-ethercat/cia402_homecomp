@@ -71,6 +71,12 @@ With sibling checkouts named `linuxcnc`, `linuxcnc-ethercat`, and
 into the selected LinuxCNC RIP `rtlib` directory.  No root privileges or
 EtherCAT hardware are needed for the simulation build.
 
+Successful CI runs publish amd64 test packages for LinuxCNC 2.9.10 and
+2.10.0-pre2 as workflow artifacts.  See [TESTING.md](TESTING.md) for package
+installation, machine wiring, first-test checks, and rollback instructions.
+These packages contain only the homecomp module; install the matching
+linuxcnc-ethercat `cia402` package separately.
+
 The build detects the 2.9 versus 2.10 homing-parameter API.  CI tests
 LinuxCNC `v2.9.10` and `v2.10.0-pre2`, with an uncached master canary.
 

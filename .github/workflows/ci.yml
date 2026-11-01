@@ -21,12 +21,15 @@ jobs:
                 include:
                     - ref: v2.9.10
                       cache: true
+                      package: true
                     - ref: v2.10.0-pre2
                       cache: true
+                      package: true
                     # Master is an early-warning canary.  Do not cache it:
                     # every run must build current upstream source.
                     - ref: master
                       cache: false
+                      package: false
 
         steps:
             - name: Checkout homecomp
@@ -86,3 +89,19 @@ jobs:
               env:
                   LINUXCNC_SRC: ${{ github.workspace }}/linuxcnc
               run: tests/sim/test.sh
+
+            - name: Package test module
+              if: matrix.package
+              env:
+                  LINUXCNC_SRC: ${{ github.workspace }}/linuxcnc
+                  LINUXCNC_REF: ${{ matrix.ref }}
+              run: scripts/package.sh
+
+            - name: Upload test package
+              if: matrix.package
+              uses: actions/upload-artifact@v4
+              with:
+                  name: cia402-homecomp-${{ matrix.ref }}-amd64
+                  path: dist/*.deb
+                  if-no-files-found: error
+                  retention-days: 90
