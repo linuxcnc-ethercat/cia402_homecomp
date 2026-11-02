@@ -6,8 +6,8 @@ the original GPL-2.0 license and history.
 
 The production drive interface is the maintained `cia402` component from
 [linuxcnc-ethercat](https://github.com/linuxcnc-ethercat/linuxcnc-ethercat).
-The older `cia402.comp` and `basecomp.comp` files in this repository are
-historical references, not additional production implementations.
+The simulation build compiles that same C source; no copy is kept here.
+`basecomp.comp` is a historical homing template, not a production implementation.
 
 ## Architecture and ownership
 
