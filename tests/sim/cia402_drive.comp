@@ -1,4 +1,9 @@
 /*
+ * TEST ONLY - NOT FOR PRODUCTION USE.
+ *
+ * Virtual CiA402 drive for headless CI simulation.  Do not load this component
+ * in a real machine configuration or connect it to physical EtherCAT hardware.
+ *
  * Test-only virtual CiA402 drive for LinuxCNC HAL.
  *
  * This program is free software; you can redistribute it and/or modify
