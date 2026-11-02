@@ -1,3 +1,9 @@
+/*
+ * HISTORICAL PROTOTYPE - NOT FOR PRODUCTION USE.
+ *
+ * Retained only as a reference.  Use the maintained C implementation in
+ * linuxcnc-ethercat/src/cia402.c instead.  Do not install this component.
+ */
 component cia402 "HAL CiA402 Drive interface layer";
 //
 //    Copyright (C) 2019 Dominik Braun <dominik.braun@eventor.de>
