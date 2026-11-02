@@ -30,10 +30,13 @@ sudo apt install ./cia402-homecomp_<version>_amd64.deb
 The package installs only `/usr/lib/linuxcnc/modules/cia402_homecomp.so`.
 It does not replace LinuxCNC, `cia402`, or the EtherCAT master.
 
-Use the maintained `cia402` component from linuxcnc-ethercat v1.48.0 or later,
-installed from the [linuxcnc-ethercat apt repository](https://github.com/linuxcnc-ethercat/apt).
-Use the normal `main` flavor for LinuxCNC 2.9 and the HAL getter/setter flavor
-required by the installed LinuxCNC 2.10 build. Do not load the prototype
+Use the maintained `cia402` component from linuxcnc-ethercat with the stale
+mode-entry homing fix.  For this test cycle, use commit
+`6654f39fc52060452db11e087b3ace4b985ea37c` from branch
+`fix/cia402-homing-stale-status`; release v1.48.0 predates this fix.  Install
+an updated package when provided, or build that source for the machine.  Use
+the normal `main` flavor for LinuxCNC 2.9 and the HAL getter/setter flavor
+required by the installed LinuxCNC 2.10 build.  Do not load the prototype
 `cia402.comp` alongside it.
 
 Back up the machine configuration before editing it.

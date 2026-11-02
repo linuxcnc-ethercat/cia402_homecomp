@@ -7,6 +7,8 @@ the original GPL-2.0 license and history.
 The production drive interface is the maintained `cia402` component from
 [linuxcnc-ethercat](https://github.com/linuxcnc-ethercat/linuxcnc-ethercat).
 The simulation build compiles that same C source; no copy is kept here.
+Current tests require `cia402` commit `6654f39fc52060452db11e087b3ace4b985ea37c`
+or an equivalent later release with stale mode-entry homing protection.
 `basecomp.comp` is a historical homing template, not a production implementation.
 
 ## Architecture and ownership
@@ -24,7 +26,9 @@ This module splits responsibilities as follows:
 - During drive-owned homing only, `cia-pos-fb-out` follows `cia-pos-cmd`.
   Actual drive feedback remains available on `cia-pos-fb-in`.
 - Completion requires a fresh homed indication after the new attempt has been
-  observed unhomed.  A stale `cia402.stat-homed` cannot complete a rehome.
+  observed unhomed in acknowledged mode 6.  A stale `cia402.stat-homed` cannot
+  complete a rehome.  `cia402` applies the same guard before clearing the
+  shared home request, so stale CSP status cannot cancel and restart homing.
   Statusword bits 10 and 12 are decoded by `cia402`; homing error takes
   precedence, including when target-reached is also set.
 - The module waits for rotary unlock and drive operation-enabled before
@@ -190,7 +194,8 @@ Covered scenarios:
 - Concurrent mixed drive-controlled/standard homing and synchronized final moves
 - Sequential three-drive `Home All`, repeated `Home All`, and `Home All` after
   one or two joints were manually homed.  Each attempt must start every drive
-  exactly once in sequence order, with no premature homed transition
+  exactly once in sequence order, with no premature homed transition.  The
+  last sequence drive also injects a stale homed pulse on mode entry
 - Active two-drive peer abort during drive motion and base finalization
 - Standard-homing retry after an aborted drive-homing attempt
 - Standard-peer abort of an active CiA joint, including reversed joint order

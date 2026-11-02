@@ -17,6 +17,7 @@ failures = []
 messages = []
 attempt = None
 HOME = (10.0, 20.0, 30.0)
+EXPECTED_MOTOR = (110.0, 140.0, 170.0)
 
 
 def check(condition, message):
@@ -106,6 +107,10 @@ def check_final_position(joint, label):
     check(abs(s.joint[joint]["input"] - HOME[joint]) < 0.02,
           "%s joint %d reached %.6f instead of HOME %.1f" %
           (label, joint, s.joint[joint]["input"], HOME[joint]))
+    actual = value("joint.%d.cia-pos-fb-in" % joint)
+    check(abs(actual - EXPECTED_MOTOR[joint]) < 0.02,
+          "%s joint %d motor reached %.6f instead of %.1f" %
+          (label, joint, actual, EXPECTED_MOTOR[joint]))
 
 
 def home_all(label):
@@ -151,7 +156,8 @@ def home_manually(joint):
 
 
 machine_on()
-home_all("fresh Home All")
+home_all("fresh Home All with stale mode-entry status")
+hal.set_p("cia402-drive.2.scenario", "0")
 
 home_manually(0)
 home_all("Home All after manual joint 0")

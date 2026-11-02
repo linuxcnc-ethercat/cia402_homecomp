@@ -218,12 +218,15 @@ def peer_abort_case(peer_ticks, phase):
 
 
 machine_on()
-setp("cia402-drive.0.scenario", 0)
+# A stale CSP status pulse on the first mode-6 cycle must not complete homing.
+setp("cia402-drive.0.scenario", 4)
 
 # Drive moves 100 mm while LinuxCNC's command stays fixed.  Ordinary ferror
 # limits are only 0.10/0.25 mm, so feedback gating is essential here.
 finish_home(0)
 check(s.homed[0], "successful drive homing did not mark joint 0 homed")
+check(value("cia402-drive.0.homing-starts") == 1,
+      "stale mode-entry status caused a duplicate drive-homing start")
 check(monitor["mode6"], "drive never acknowledged operation mode 6")
 check(monitor["external_motion"] >= 95.0,
       "virtual drive did not execute large autonomous motion")

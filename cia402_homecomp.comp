@@ -401,7 +401,10 @@ static int custom_1joint_state_machine(int jno)
         c->state = CIA_HOME_WAIT_ENABLE;
     }
 
-    if ((c->state == CIA_HOME_WAIT_MODE || c->state == CIA_HOME_RUNNING) &&
+    /* Only a clear observed after the drive acknowledges mode 6 proves that
+       stale homed status has cleared.  CSP bits 10+12 can otherwise produce
+       an immediate false completion on the first homing-mode cycle. */
+    if (c->state == CIA_HOME_RUNNING &&
         !LCEC_PIN_BIT_GET(c->cia_stat_homed)) {
         c->homed_seen_clear = 1;
     }

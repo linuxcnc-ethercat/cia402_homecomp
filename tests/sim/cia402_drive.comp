@@ -25,7 +25,7 @@ pin out s32 actual-position "Simulated actual position";
 pin out s32 actual-velocity "Simulated actual velocity";
 pin out s32 homing-starts "Accepted drive-homing start edges";
 
-param rw s32 scenario = 0 "0 success, 1 homing error, 2 drive fault, 3 stall";
+param rw s32 scenario = 0 "0 success, 1 homing error, 2 drive fault, 3 stall, 4 stale homed on mode entry";
 param rw s32 homing-ticks = 50 "Cycles needed to finish homing";
 param rw s32 fault-ticks = 25 "Cycles before a scenario-2 drive fault";
 param rw u32 force-fault = 0 "Force a drive fault before homing starts";
@@ -138,6 +138,12 @@ FUNCTION(_) {
         }
 
         elapsed_ticks++;
+
+        if (scenario == 4 && elapsed_ticks == 1) {
+            /* CSP bits 10+12 may remain set for one cycle after mode 6 is
+               acknowledged.  This is not a fresh drive-homing completion. */
+            next_status |= (1u << 10) | (1u << 12);
+        }
 
         if (scenario == 2 && elapsed_ticks >= fault_ticks) {
             /* Delay is configurable so task polling can observe each phase. */

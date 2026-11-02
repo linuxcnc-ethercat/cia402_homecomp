@@ -6,7 +6,7 @@ unset CDPATH
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 LINUXCNC_SRC=${LINUXCNC_SRC:-$ROOT/../linuxcnc}
 LINUXCNC_REF=${LINUXCNC_REF:?Set LINUXCNC_REF to the exact LinuxCNC source ref}
-PACKAGE_VERSION=${PACKAGE_VERSION:-0.1.0~test1}
+PACKAGE_VERSION=${PACKAGE_VERSION:-0.1.0~test2}
 ARCH=${ARCH:-amd64}
 MODULE="$LINUXCNC_SRC/rtlib/cia402_homecomp.so"
 REF_LABEL=${LINUXCNC_REF#v}
