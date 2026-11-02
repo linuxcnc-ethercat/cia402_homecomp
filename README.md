@@ -188,6 +188,9 @@ Covered scenarios:
 - Drive fault and explicit fault reset
 - Stall timeout and user cancellation with enable revocation
 - Concurrent mixed drive-controlled/standard homing and synchronized final moves
+- Sequential three-drive `Home All`, repeated `Home All`, and `Home All` after
+  one or two joints were manually homed.  Each attempt must start every drive
+  exactly once in sequence order, with no premature homed transition
 - Active two-drive peer abort during drive motion and base finalization
 - Standard-homing retry after an aborted drive-homing attempt
 - Standard-peer abort of an active CiA joint, including reversed joint order

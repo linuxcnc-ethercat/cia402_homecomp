@@ -8,6 +8,7 @@ LINUXCNC_SRC=${LINUXCNC_SRC:-$DIR/../../../linuxcnc}
 cd "$DIR"
 unset DISPLAY
 linuxcnc -r test.ini
+linuxcnc -r sequence.ini
 if grep -q 'double home_search_dist' "$LINUXCNC_SRC/src/emc/motion/homing.h"; then
     CIA402_TEST_RETURN=1 linuxcnc -r peer.ini
 else
