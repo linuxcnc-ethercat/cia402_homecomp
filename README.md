@@ -7,8 +7,10 @@ the original GPL-2.0 license and history.
 The production drive interface is the maintained `cia402` component from
 [linuxcnc-ethercat](https://github.com/linuxcnc-ethercat/linuxcnc-ethercat).
 The simulation build compiles that same C source; no copy is kept here.
-Current tests require `cia402` commit `6654f39fc52060452db11e087b3ace4b985ea37c`
-or an equivalent later release with stale mode-entry homing protection.
+Current tests require `cia402` commit `73fde32eda3d6e210c6e8a6c1d3e9fa423ba7ebc`
+or an equivalent later revision with both stale mode-entry protection and
+acknowledged homing-start sequencing.  Release v1.48.0 and commit `6654f39`
+predate the start-sequencing fix.
 `basecomp.comp` is a historical homing template, not a production implementation.
 
 ## Architecture and ownership
@@ -25,28 +27,36 @@ This module splits responsibilities as follows:
   `cia402.N.home` request, and the enable/feedback pass-through pins.
 - During drive-owned homing only, `cia-pos-fb-out` follows `cia-pos-cmd`.
   Actual drive feedback remains available on `cia-pos-fb-in`.
-- Completion requires a fresh homed indication after the new attempt has been
-  observed unhomed in acknowledged mode 6.  A stale `cia402.stat-homed` cannot
-  complete a rehome.  `cia402` applies the same guard before clearing the
-  shared home request, so stale CSP status cannot cancel and restart homing.
+- `cia402` requests mode 6 first and sends the homing-start edge only after
+  the drive acknowledges mode 6 with operation enabled.  This supports drives
+  that ignore a start edge sent in the same PDO cycle as the mode change.
+- Completion requires a fresh homed indication after the start request has
+  been followed by unhomed status in acknowledged mode 6.  A stale
+  `cia402.stat-homed` cannot complete a rehome.  `cia402` applies the same
+  start-aware guard before clearing the shared home request, so stale status
+  from CSP or CSV cannot cancel and restart homing.
   Statusword bits 10 and 12 are decoded by `cia402`; homing error takes
   precedence, including when target-reached is also set.
 - The module waits for rotary unlock and drive operation-enabled before
   asserting the homing request.  Drive faults and the configured timeout also
   abort an unlock wait.  `LOCKING_INDEXER` retains its normal unlock/relock
-  behavior.  An explicit standard-homing retry also clears abort inhibition.
+  behavior.  An explicit standard-homing retry also clears post-abort recovery
+  state.
 - `HOME_ABSOLUTE_ENCODER` delegates to LinuxCNC's base homing path instead of
   starting drive-owned motion, preserving its no-rehome/no-final-move behavior.
 - On success, the module reconciles motor offset, actual feedback, command,
   and the free planner, then delegates the normal final move to LinuxCNC.
   `HOME` and `HOME_OFFSET` therefore keep their standard meaning.
 - On fault, homing error, timeout, or cancellation, it withdraws the home
-  request, synchronizes to actual position, enters LinuxCNC's normal abort
-  path, and revokes drive enable until an explicit homing retry.  Active
-  same-sequence CiA peers are revoked immediately, including peers in base
-  finalization.  Standard-peer failures trigger cleanup in the same servo
-  invocation.  On LinuxCNC 2.10, a bounded-move return stops drive-owned
-  motion while preserving the base coordinated return states.
+  request, synchronizes to actual position, and enters LinuxCNC's normal abort
+  path.  Enable continues to follow `joint.N.amp-enable-out`, so normal machine
+  disable, fault, and E-stop paths retain control.  While idle after an abort,
+  command tracks actual position; a manual jog or homing retry ends that
+  recovery and restores normal planner ownership.  Active same-sequence CiA
+  peers abort immediately, including peers in base finalization.
+  Standard-peer failures trigger cleanup in the same servo invocation.  On
+  LinuxCNC 2.10, a bounded-move return stops drive-owned motion while
+  preserving the base coordinated return states.
 - Joints with `request-custom-homing` cleared use LinuxCNC's standard homing
   state machine, so mixed configurations are supported.
 
@@ -149,7 +159,7 @@ Replace `N` with the joint number.
 | `joint.N.request-custom-homing` | IN | Select drive-controlled homing for this joint |
 | `joint.N.is-custom-homing` | OUT | Echo of the selection input |
 | `joint.N.cia-enable-in` | IN | Normally `joint.N.amp-enable-out` |
-| `joint.N.cia-enable-out` | OUT | Drive enable with abort inhibition |
+| `joint.N.cia-enable-out` | OUT | Pass-through of normal LinuxCNC joint enable |
 | `joint.N.cia-pos-cmd` | IN | LinuxCNC motor position command |
 | `joint.N.cia-velocity-cmd` | IN | LinuxCNC joint velocity command |
 | `joint.N.cia-pos-fb-in` | IN | Actual scaled feedback from `cia402` |
@@ -158,7 +168,7 @@ Replace `N` with the joint number.
 | `joint.N.cia-velocity-fb-out` | OUT | Velocity feedback for an optional PID loop |
 | `joint.N.cia-home` | IO | Shared home request; `cia402` clears it on the homed edge |
 | `joint.N.cia-stat-homed` | IN | Bits 10+12 decoded by `cia402` |
-| `joint.N.cia-stat-homing` | IN | Diagnostic drive-homing status |
+| `joint.N.cia-stat-homing` | IN | Drive homing active after start request; required for fresh-status validation |
 | `joint.N.cia-stat-homing-error` | IN | Homing-mode statusword bit 13 |
 | `joint.N.cia-stat-fault` | IN | Drive fault statusword bit 3 |
 | `joint.N.cia-stat-op-enabled` | IN | Drive operation-enabled status; required before homing starts |
@@ -190,12 +200,14 @@ Covered scenarios:
 - Strict operation-enabled retry after cancellation
 - Homing error with target-reached asserted simultaneously
 - Drive fault and explicit fault reset
-- Stall timeout and user cancellation with enable revocation
+- Stall timeout and user cancellation with CSP restoration and normal enable
+  control; manual jogging works after a timeout without a homing retry
 - Concurrent mixed drive-controlled/standard homing and synchronized final moves
 - Sequential three-drive `Home All`, repeated `Home All`, and `Home All` after
   one or two joints were manually homed.  Each attempt must start every drive
   exactly once in sequence order, with no premature homed transition.  The
-  last sequence drive also injects a stale homed pulse on mode entry
+  middle sequence drive rejects a start edge sent together with the mode-6
+  request; the last drive injects a stale homed pulse on mode entry
 - Active two-drive peer abort during drive motion and base finalization
 - Standard-homing retry after an aborted drive-homing attempt
 - Standard-peer abort of an active CiA joint, including reversed joint order

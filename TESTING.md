@@ -30,14 +30,50 @@ sudo apt install ./cia402-homecomp_<version>_amd64.deb
 The package installs only `/usr/lib/linuxcnc/modules/cia402_homecomp.so`.
 It does not replace LinuxCNC, `cia402`, or the EtherCAT master.
 
-Use the maintained `cia402` component from linuxcnc-ethercat with the stale
-mode-entry homing fix.  For this test cycle, use commit
-`6654f39fc52060452db11e087b3ace4b985ea37c` from branch
-`fix/cia402-homing-stale-status`; release v1.48.0 predates this fix.  Install
-an updated package when provided, or build that source for the machine.  Use
-the normal `main` flavor for LinuxCNC 2.9 and the HAL getter/setter flavor
-required by the installed LinuxCNC 2.10 build.  Do not load the prototype
-`cia402.comp` alongside it.
+Use the maintained `cia402` component from linuxcnc-ethercat with both the
+stale mode-entry homing fix and acknowledged homing-start sequencing.  For this
+test cycle, use commit `73fde32eda3d6e210c6e8a6c1d3e9fa423ba7ebc` or an
+equivalent later revision.  Release v1.48.0 and commit `6654f39` predate the
+start-sequencing fix.  Install a package with both fixes when provided, or build
+the matching updated source for the machine.  Use the normal
+`main` flavor for LinuxCNC 2.9 and the HAL getter/setter flavor required by the
+installed LinuxCNC 2.10 build.  Do not load the prototype `cia402.comp`
+alongside it.
+
+### Build from source instead
+
+Building requires a LinuxCNC run-in-place (RIP) tree that has already been
+built.  Clone the two source repositories and check out the exact `cia402`
+commit named in the test announcement:
+
+```sh
+TESTED_COMMIT=73fde32eda3d6e210c6e8a6c1d3e9fa423ba7ebc
+git clone https://github.com/linuxcnc-ethercat/linuxcnc-ethercat.git
+git -C linuxcnc-ethercat checkout "$TESTED_COMMIT"
+git clone --branch feat/sim-homing https://github.com/linuxcnc-ethercat/cia402_homecomp.git
+```
+
+`TESTED_COMMIT` is set to the commit used by the current CI tests.  If a newer
+test announcement names a different commit, update the variable.  The detached
+HEAD from `git checkout "$TESTED_COMMIT"` is expected for a fixed test build.
+In an existing clone, fetch first, then check out the commit using the same
+variable:
+
+```sh
+git -C linuxcnc-ethercat fetch origin
+git -C linuxcnc-ethercat checkout "$TESTED_COMMIT"
+```
+
+Build homecomp and `cia402` into the LinuxCNC RIP `rtlib` directory:
+
+```sh
+LINUXCNC_SRC=/path/to/linuxcnc \
+LINUXCNC_ETHERCAT_SRC=/path/to/linuxcnc-ethercat \
+/path/to/cia402_homecomp/scripts/build.sh
+```
+
+This source build serves the selected RIP tree.  Use the Debian packages for a
+normal full installation instead.
 
 Back up the machine configuration before editing it.
 
@@ -119,6 +155,9 @@ Home the selected joint and check:
 2. The joint becomes homed and finishes at the configured `HOME` coordinate.
 3. Normal jogging works after homing.
 4. Unhome and home again; the second attempt must perform a fresh drive home.
+5. After an aborted homing attempt, the drive returns to its configured cyclic
+   mode (CSP or CSV), normal enable control is restored, and manual jogging
+   works without another homing retry.
 
 Report the drive make/model, homing method, LinuxCNC version, package
 `BUILD-INFO`, changed INI/HAL files, and `homecomp-test.log`. Include any drive
