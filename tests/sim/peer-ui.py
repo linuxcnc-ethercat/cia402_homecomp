@@ -97,8 +97,9 @@ def check_peer_abort(joint, label):
           label + " stranded CiA peer in post-abort cleanup")
     check(not value("joint.%d.cia-home" % joint),
           label + " left CiA home request asserted")
-    check(not value("joint.%d.cia-enable-out" % joint),
-          label + " left CiA drive enabled")
+    check(value("joint.%d.cia-enable-out" % joint) ==
+          value("joint.%d.cia-enable-in" % joint),
+          label + " did not restore normal joint enable control")
     check(not s.homed[joint], label + " falsely marked CiA joint homed")
     check(s.task_state == linuxcnc.STATE_ON,
           label + " unexpectedly forced E-stop")

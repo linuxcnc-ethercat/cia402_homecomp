@@ -169,8 +169,8 @@ def check_no_following_error(label):
 def check_failed_home(label):
     check(not s.homed[0], "%s falsely marked joint 0 homed" % label)
     check(not value("joint.0.cia-home"), "%s left cia402.home asserted" % label)
-    check(not value("joint.0.cia-enable-out"),
-          "%s did not revoke drive enable" % label)
+    check(value("joint.0.cia-enable-out") == value("joint.0.cia-enable-in"),
+          "%s did not restore normal joint enable control" % label)
     check_no_following_error(label)
 
 
@@ -202,8 +202,8 @@ def peer_abort_case(peer_ticks, phase):
           value("cia402-drive.1.homing-starts") == starts1 + 1,
           "both CiA peers did not accept drive-homing starts")
     check(monitor[phase], "peer-abort test did not reach " + phase)
-    check(not value("joint.1.cia-enable-out"),
-          "peer abort left second CiA drive enabled")
+    check(value("joint.1.cia-enable-out") == value("joint.1.cia-enable-in"),
+          "peer abort did not restore normal joint enable control")
     check(s.task_state == linuxcnc.STATE_ON,
           "CiA peer abort unexpectedly forced E-stop")
     setp("cia402-drive.0.scenario", 0)
@@ -218,7 +218,7 @@ def peer_abort_case(peer_ticks, phase):
 
 
 machine_on()
-# A stale CSP status pulse on the first mode-6 cycle must not complete homing.
+# A stale cyclic-mode status pulse on the first mode-6 cycle must not complete homing.
 setp("cia402-drive.0.scenario", 4)
 
 # Drive moves 100 mm while LinuxCNC's command stays fixed.  Ordinary ferror
@@ -257,6 +257,17 @@ setp("cia402-drive.0.scenario", 3)
 setp("joint.0.cia-timeout-ms", 100)
 finish_home(0)
 check_failed_home("stalled drive timeout")
+check(wait_for(lambda: value("joint.0.cia-opmode-display") == 8),
+      "timeout did not restore CSP operation")
+start = value("joint.0.cia-pos-fb-in")
+c.jog(linuxcnc.JOG_CONTINUOUS, 1, 0, 5.0)
+check(wait_for(lambda: value("joint.0.cia-pos-fb-in") > start + 5.0),
+      "manual jog did not work after homing timeout")
+c.jog(linuxcnc.JOG_STOP, 1, 0)
+c.wait_complete()
+time.sleep(0.1)
+poll()
+check_no_following_error("manual jog after homing timeout")
 setp("joint.0.cia-timeout-ms", 1000)
 
 setp("cia402-drive.0.scenario", 0)
@@ -338,7 +349,7 @@ finish_home(-1, timeout=45.0)
 check(s.homed[0] and s.homed[1],
       "custom/standard retry after peer abort did not home both")
 check(value("joint.1.cia-enable-out") and not value("joint.1.cia-peer-abort"),
-      "standard retry did not clear aborted drive inhibition")
+      "standard retry did not clear aborted peer state")
 unhome(0)
 unhome(1)
 

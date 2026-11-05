@@ -141,8 +141,8 @@ def unhome(joint):
 def check_failed_home(label):
     check(not s.homed[0], label + " falsely marked joint 0 homed")
     check(not value("joint.0.cia-home"), label + " left home request asserted")
-    check(not value("joint.0.cia-enable-out"),
-          label + " did not revoke drive enable")
+    check(value("joint.0.cia-enable-out") == value("joint.0.cia-enable-in"),
+          label + " did not restore normal joint enable control")
 
 
 def check_locked_at_home(label):
@@ -169,7 +169,7 @@ check_locked_at_home("locking drive home")
 check(not any("following error" in m.lower() for m in messages),
       "locking homing caused a LinuxCNC following error")
 
-# A missing unlock must not bypass timeout accounting or leave enable asserted.
+# A missing unlock must not bypass timeout accounting or strand drive enable.
 unhome(0)
 auto_unlock = False
 setp("joint.0.cia-timeout-ms", 100)

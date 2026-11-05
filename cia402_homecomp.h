@@ -20,7 +20,7 @@ typedef struct {
     hal_bit_t *request_custom_homing;  // IN
     hal_bit_t *is_custom_homing;       // OUT
 
-    // Enable pass-through.  Abort revokes enable until an explicit retry.
+    // Enable pass-through remains under normal LinuxCNC joint control.
     hal_bit_t *cia_enable_in;          // IN
     hal_bit_t *cia_enable_out;         // OUT
 
@@ -52,7 +52,7 @@ typedef struct {
 
     cia_home_state_t state;
     int64_t elapsed_ns;
-    bool enable_inhibit;
+    bool recover_position;
     bool homed_seen_clear;
     bool peer_abort;
 } cia402_joint_t;

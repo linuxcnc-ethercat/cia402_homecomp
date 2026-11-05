@@ -173,7 +173,7 @@ static void custom_update_outputs(int jno)
     LCEC_PIN_S32_SET(c->cia_state, c->state);
     LCEC_PIN_BIT_SET(c->cia_peer_abort, c->peer_abort);
     LCEC_PIN_BIT_SET(c->cia_enable_out,
-        LCEC_PIN_BIT_GET(c->cia_enable_in) && !c->enable_inhibit);
+        LCEC_PIN_BIT_GET(c->cia_enable_in));
 
     if (homing) {
         LCEC_PIN_FLOAT_SET(c->cia_pos_fb_out,
@@ -212,8 +212,8 @@ static void custom_sync_position(int jno, bool at_home)
 static void custom_cleanup_idle(int jno)
 {
     cia402_joint_t *c = &ciaJ[jno];
-    if (!H[jno].homed && !c->enable_inhibit) {
-        c->enable_inhibit = 1;
+    if (!H[jno].homed && !c->recover_position) {
+        c->recover_position = 1;
         c->peer_abort = 1;
         custom_sync_position(jno, false);
     }
@@ -229,7 +229,7 @@ static void custom_abort_peer(int jno)
     }
     rtapi_print_msg(RTAPI_MSG_ERR,
         "cia402_homecomp: joint %d homing aborted: peer failure\n", jno);
-    c->enable_inhibit = 1;
+    c->recover_position = 1;
     c->peer_abort = 1;
     c->state = CIA_HOME_BASE;
     custom_sync_position(jno, false);
@@ -263,7 +263,7 @@ static void custom_return_peer(int jno)
     if (c->state == CIA_HOME_BASE && c->peer_abort) return;
     rtapi_print_msg(RTAPI_MSG_ERR,
         "cia402_homecomp: joint %d homing stopped: peer return\n", jno);
-    c->enable_inhibit = 1;
+    c->recover_position = 1;
     c->peer_abort = 1;
     c->state = CIA_HOME_BASE;
     custom_sync_position(jno, false);
@@ -300,7 +300,7 @@ static void custom_abort(int jno, const char *reason)
 
     rtapi_print_msg(RTAPI_MSG_ERR,
         "cia402_homecomp: joint %d homing aborted: %s\n", jno, reason);
-    c->enable_inhibit = 1;
+    c->recover_position = 1;
     c->state = CIA_HOME_BASE;
     custom_sync_position(jno, false);
     H[jno].home_state = HOME_ABORT;
@@ -362,7 +362,7 @@ static int custom_1joint_state_machine(int jno)
         H[jno].pause_timer = 0;
         joints[jno].free_tp.enable = 0;
         sync_reset();
-        c->enable_inhibit = 0;
+        c->recover_position = 0;
         c->elapsed_ns = 0;
         c->homed_seen_clear = 0;
         c->peer_abort = 0;
@@ -456,10 +456,15 @@ void write_homing_out_pins(int njoints)
     base_write_homing_out_pins(njoints);
     if (!ciaJ) return;
     for (jno = 0; jno < njoints; jno++) {
-        // Track any residual drive motion after an abort while keeping the
-        // drive disabled and the joint unhomed.
-        if (ciaJ[jno].enable_inhibit && H[jno].home_state == HOME_IDLE) {
-            custom_sync_position(jno, false);
+        /* After an abort, track residual drive motion only while the joint is
+           idle.  A manual jog restores normal planner ownership immediately;
+           a homing retry clears recovery in the start path. */
+        if (ciaJ[jno].recover_position && H[jno].home_state == HOME_IDLE) {
+            if (joints[jno].free_tp.enable) {
+                ciaJ[jno].recover_position = 0;
+            } else {
+                custom_sync_position(jno, false);
+            }
         }
         custom_update_outputs(jno);
     }
@@ -492,8 +497,8 @@ bool do_homing(void)
             busy += custom_1joint_state_machine(jno);
         } else {
             if (ciaJ && H[jno].home_state == HOME_START) {
-                /* An explicit standard-homing retry also clears inhibition. */
-                ciaJ[jno].enable_inhibit = 0;
+                /* An explicit standard-homing retry also clears recovery. */
+                ciaJ[jno].recover_position = 0;
                 ciaJ[jno].peer_abort = 0;
             }
             busy += base_1joint_state_machine(jno);
