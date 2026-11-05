@@ -110,6 +110,8 @@ setp cia402-drive.2.step-size 2500
 setp cia402-drive.0.homing-ticks 30
 setp cia402-drive.1.homing-ticks 30
 setp cia402-drive.2.homing-ticks 30
+# The middle sequence joint requires mode 6 before accepting the start edge.
+setp cia402-drive.1.scenario 5
 # The last sequence joint presents one stale homed pulse on mode entry.
 setp cia402-drive.2.scenario 4
 

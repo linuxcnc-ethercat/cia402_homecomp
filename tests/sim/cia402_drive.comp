@@ -25,7 +25,7 @@ pin out s32 actual-position "Simulated actual position";
 pin out s32 actual-velocity "Simulated actual velocity";
 pin out s32 homing-starts "Accepted drive-homing start edges";
 
-param rw s32 scenario = 0 "0 success, 1 homing error, 2 drive fault, 3 stall, 4 stale homed on mode entry";
+param rw s32 scenario = 0 "0 success, 1 homing error, 2 drive fault, 3 stall, 4 stale homed on mode entry, 5 require mode 6 before start edge";
 param rw s32 homing-ticks = 50 "Cycles needed to finish homing";
 param rw s32 fault-ticks = 25 "Cycles before a scenario-2 drive fault";
 param rw u32 force-fault = 0 "Force a drive fault before homing starts";
@@ -35,6 +35,7 @@ param rw s32 step-size = 1000 "Position change per homing cycle";
 
 variable int homing_active = 0;
 variable int previous_homing_request = 0;
+variable int previous_requested_opmode = 0;
 variable int faulted = 0;
 variable int power_state = 0;
 variable int homing_starts_count = 0;
@@ -104,16 +105,20 @@ FUNCTION(_) {
     }
 
     /* Strict drives ignore a bit-4 edge that arrives before the drive was
-       operation-enabled.  Remembering the raw request also prevents a late
-       enable transition from manufacturing a second rising edge. */
+       operation-enabled.  Scenario 5 also requires requested mode 6 to have
+       been established for one cycle, rejecting a simultaneous mode/start
+       request.  Remembering the raw request prevents a late transition from
+       manufacturing a second rising edge. */
     if (homing_request && !previous_homing_request &&
-        was_op_enabled && !faulted) {
+        was_op_enabled && !faulted &&
+        (scenario != 5 || previous_requested_opmode == 6)) {
         homing_active = 1;
         elapsed_ticks = 0;
         homing_starts_count++;
         DRIVE_SET(homing_starts, homing_starts_count);
     }
     previous_homing_request = homing_request;
+    previous_requested_opmode = opmode;
 
     if (!homing_request || power_state != 3 || faulted) {
         homing_active = 0;
@@ -140,7 +145,7 @@ FUNCTION(_) {
         elapsed_ticks++;
 
         if (scenario == 4 && elapsed_ticks == 1) {
-            /* CSP bits 10+12 may remain set for one cycle after mode 6 is
+            /* Cyclic-mode bits 10+12 may remain set for one cycle after mode 6 is
                acknowledged.  This is not a fresh drive-homing completion. */
             next_status |= (1u << 10) | (1u << 12);
         }
