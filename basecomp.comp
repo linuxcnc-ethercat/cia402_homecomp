@@ -1,3 +1,9 @@
+/*
+ * EXAMPLE TEMPLATE - NOT FOR PRODUCTION USE.
+ *
+ * Retained only as a homing-module reference.  Use cia402_homecomp.comp for
+ * the maintained implementation in this repository.
+ */
 component basecomp"homing module template";
 
 description """
